@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual env
+env/
+venv/
+.refine/
+
+# VSCode
+.vscode/
+
+# PyTorch models
+*.pt
+*.pth
+*.ckpt
+
+# Dataset
+dataset/
+data/
+*.inter
+*.item
+
+# Logs
+results4comparison/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
