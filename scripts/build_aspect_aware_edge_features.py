@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import argparse
 import json
 import re
@@ -215,7 +216,17 @@ def build_aspect_vocab(aspects_by_row: Dict[int, List[dict]], min_freq: int) -> 
     return vocab, counter
 
 
-def build_aspect_matrix(sentiment_df: pd.DataFrame, aspects_by_row: Dict[int, List[dict]], aspect_vocab: Dict[str, int]):
+def build_aspect_matrix(
+    sentiment_df: pd.DataFrame,
+    aspects_by_row: Dict[int, List[dict]],
+    aspect_vocab: Dict[str, int],
+):
+    """
+    Build a signed aspect vector per review:
+      +1  => aspect appears with positive sentiment
+      -1  => aspect appears with negative sentiment
+       0  => absent / neutralized
+    """
     n_rows = int(sentiment_df["row_index"].max()) + 1
     matrix = np.zeros((n_rows, len(aspect_vocab)), dtype=np.float32)
     debug_rows = []
@@ -225,6 +236,7 @@ def build_aspect_matrix(sentiment_df: pd.DataFrame, aspects_by_row: Dict[int, Li
         aspects = aspects_by_row.get(row_index, [])
         if not aspects:
             continue
+
         row_updates = []
         for a in aspects:
             asp = normalize_aspect(a["aspect"])
@@ -232,8 +244,21 @@ def build_aspect_matrix(sentiment_df: pd.DataFrame, aspects_by_row: Dict[int, Li
                 continue
             idx = aspect_vocab[asp]
             score = int(a["score"])
-            matrix[row_index, idx] += float(score)
+            score = 1 if score > 0 else (-1 if score < 0 else 0)
+            if score == 0:
+                continue
+
+            prev = matrix[row_index, idx]
+            if prev == 0:
+                matrix[row_index, idx] = float(score)
+            elif prev == score:
+                pass
+            else:
+                # conflicting polarity for the same aspect in one review -> neutralize
+                matrix[row_index, idx] = 0.0
+
             row_updates.append((asp, score))
+
         if row_updates:
             debug_rows.append(
                 {
@@ -242,9 +267,6 @@ def build_aspect_matrix(sentiment_df: pd.DataFrame, aspects_by_row: Dict[int, Li
                     "kept_aspects": json.dumps(row_updates, ensure_ascii=False),
                 }
             )
-
-    if len(aspect_vocab) > 0:
-        np.clip(matrix, -1.0, 1.0, out=matrix)
 
     return matrix, pd.DataFrame(debug_rows)
 
@@ -264,6 +286,11 @@ def main():
     parser.add_argument("--min_aspect_freq", type=int, default=10)
     parser.add_argument("--text_model", default="all-MiniLM-L6-v2")
     parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument(
+        "--report_only",
+        action="store_true",
+        help="Only report aspect frequency statistics and stop before building embeddings.",
+    )
     args = parser.parse_args()
 
     sentiment_csv = Path(args.sentiment_csv)
@@ -282,6 +309,35 @@ def main():
     aspects_by_row = load_absa_sources(output_dir, absa_jsonl, absa_csv)
     aspect_vocab, aspect_counter = build_aspect_vocab(aspects_by_row, min_freq=args.min_aspect_freq)
 
+    # Always save a lightweight report of the aspect frequencies.
+    freq_report = pd.DataFrame(
+        [
+            {"aspect": asp, "count": int(cnt), "kept": bool(cnt >= args.min_aspect_freq)}
+            for asp, cnt in sorted(aspect_counter.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+    )
+    freq_report.to_csv(output_dir / "aspect_frequency_report.csv", index=False, encoding="utf-8-sig")
+
+    vocab_payload = {
+        "min_aspect_freq": args.min_aspect_freq,
+        "num_unique_aspects": int(len(aspect_counter)),
+        "num_kept_aspects": int(len(aspect_vocab)),
+        "kept_aspects": [
+            {"aspect": asp, "index": idx, "count": int(aspect_counter[asp])}
+            for asp, idx in sorted(aspect_vocab.items(), key=lambda kv: kv[1])
+        ],
+    }
+    write_json(output_dir / "aspect_vocab_filtered.json", vocab_payload)
+
+    print("Done (frequency report).")
+    print(f"Unique aspects: {len(aspect_counter)}")
+    print(f"Kept aspects (freq >= {args.min_aspect_freq}): {len(aspect_vocab)}")
+    print(f"Saved: {output_dir / 'aspect_frequency_report.csv'}")
+    print(f"Saved: {output_dir / 'aspect_vocab_filtered.json'}")
+
+    if args.report_only:
+        return
+
     text_embeddings, source_path, computed_flag = load_text_embeddings(
         output_dir=output_dir,
         sentiment_df=sentiment_df,
@@ -297,7 +353,10 @@ def main():
             f"Text embeddings rows ({text_embeddings.shape[0]}) and aspect matrix rows ({aspect_matrix.shape[0]}) do not match."
         )
 
-    combined = np.concatenate([text_embeddings.astype(np.float32, copy=False), aspect_matrix.astype(np.float32, copy=False)], axis=1)
+    combined = np.concatenate(
+        [text_embeddings.astype(np.float32, copy=False), aspect_matrix.astype(np.float32, copy=False)],
+        axis=1,
+    )
 
     review_embeddings_path = output_dir / "review_embeddings.npy"
     backup_path = output_dir / "review_embeddings_text_only.npy"
@@ -307,17 +366,6 @@ def main():
     np.save(output_dir / "edge_features.npy", combined)
     np.save(review_embeddings_path, combined)
     np.save(output_dir / "aspect_vector_matrix.npy", aspect_matrix.astype(np.float32, copy=False))
-
-    vocab_payload = {
-        "min_aspect_freq": args.min_aspect_freq,
-        "num_unique_aspects": int(len(aspect_counter)),
-        "num_kept_aspects": int(len(aspect_vocab)),
-        "kept_aspects": [
-            {"aspect": asp, "index": idx, "count": int(aspect_counter[asp])}
-            for asp, idx in sorted(aspect_vocab.items(), key=lambda kv: kv[1])
-        ],
-    }
-    write_json(output_dir / "aspect_vocab_filtered.json", vocab_payload)
 
     manifest = {
         "sentiment_csv": str(sentiment_csv),
@@ -337,15 +385,13 @@ def main():
     if computed_flag:
         np.save(output_dir / "review_embeddings_text_only.npy", text_embeddings.astype(np.float32, copy=False))
 
-    print("Done.")
-    print(f"Unique aspects: {len(aspect_counter)}")
-    print(f"Kept aspects: {len(aspect_vocab)}")
+    print("Embedding build done.")
     print(f"Text dim: {text_embeddings.shape[1]}")
     print(f"Aspect dim: {aspect_matrix.shape[1]}")
     print(f"Combined dim: {combined.shape[1]}")
     print(f"Saved: {review_embeddings_path}")
     print(f"Saved: {output_dir / 'edge_features.npy'}")
-    print(f"Saved: {output_dir / 'aspect_vocab_filtered.json'}")
+    print(f"Saved: {output_dir / 'aspect_vector_matrix.npy'}")
     print(f"Saved: {output_dir / 'edge_feature_manifest.json'}")
 
 

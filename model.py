@@ -125,12 +125,12 @@ class ReFINe_plus(torch.nn.Module):
 
         return user_latent, item_latent, user_reconstructed, item_reconstructed
 
-    def predict_link(self, edge_index: Adj, edge_label_index: OptTensor = None, edge_weight: OptTensor = None, prob: bool = False) -> Tensor:
-        pred = self(edge_index, edge_label_index, edge_weight).sigmoid()
+    def predict_link(self, edge_index: Adj, edge_label_index: OptTensor = None, edge_weight: OptTensor = None, edge_attr: OptTensor = None, prob: bool = False) -> Tensor:
+        pred = self(edge_index, edge_label_index, edge_weight=edge_weight, edge_attr=edge_attr).sigmoid()
         return pred if prob else pred.round()
 
-    def recommend(self, edge_index: Adj, edge_weight: OptTensor = None, src_index: OptTensor = None, dst_index: OptTensor = None, k: int = 1, sorted: bool = True) -> Tensor:
-        out_src = out_dst = self.get_embedding(edge_index, edge_weight)
+    def recommend(self, edge_index: Adj, edge_weight: OptTensor = None, edge_attr: OptTensor = None, src_index: OptTensor = None, dst_index: OptTensor = None, k: int = 1, sorted: bool = True) -> Tensor:
+        out_src = out_dst = self.get_embedding(edge_index, edge_weight=edge_weight, edge_attr=edge_attr)
 
         if src_index is not None:
             out_src = out_src[src_index]
