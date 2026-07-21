@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Sequence
 
 import numpy as np
 import pandas as pd
@@ -8,7 +8,14 @@ from sklearn.preprocessing import LabelEncoder
 from torch_geometric.data import HeteroData
 
 
+USER_COL_CANDIDATES: Sequence[str] = ("user_idx", "user_id:token", "user_id", "user", "uid")
+ITEM_COL_CANDIDATES: Sequence[str] = ("item_idx", "item_id:token", "item_id", "item", "iid")
+RATING_COL_CANDIDATES: Sequence[str] = ("rating:float", "rating", "score")
+
+
 def _read_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing file: {path}")
     df = pd.read_csv(path)
     if "row_index" not in df.columns:
         df = df.copy()
@@ -16,7 +23,59 @@ def _read_csv(path: Path) -> pd.DataFrame:
     return df
 
 
+def _find_first_existing_column(df: pd.DataFrame, candidates: Sequence[str]) -> Optional[str]:
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
+
+
+def _canonicalize_edge_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert raw split dataframe into a canonical internal format:
+      - user_id:token
+      - item_id:token
+      - rating:float
+      - row_index
+
+    Supports both:
+      - user_idx / item_idx
+      - user_id / item_id
+    """
+    out = df.copy()
+
+    if "row_index" not in out.columns:
+        out["row_index"] = out.index.astype(int)
+
+    user_col = _find_first_existing_column(out, USER_COL_CANDIDATES)
+    item_col = _find_first_existing_column(out, ITEM_COL_CANDIDATES)
+    rating_col = _find_first_existing_column(out, RATING_COL_CANDIDATES)
+
+    if user_col is None:
+        raise KeyError(f"No user column found. Expected one of: {list(USER_COL_CANDIDATES)}")
+    if item_col is None:
+        raise KeyError(f"No item column found. Expected one of: {list(ITEM_COL_CANDIDATES)}")
+
+    # Create canonical internal columns.
+    out["user_id:token"] = out[user_col]
+    out["item_id:token"] = out[item_col]
+
+    if rating_col is None:
+        out["rating:float"] = 0.0
+    else:
+        out["rating:float"] = pd.to_numeric(out[rating_col], errors="coerce").fillna(0.0)
+
+    return out
+
+
 def _load_edge_features(project_dir: Path, n_rows: int) -> Optional[np.ndarray]:
+    """
+    Preferred file:
+      project_dir/edge_features.npy
+
+    Fallback:
+      project_dir/review_embeddings.npy
+    """
     for fname in ("edge_features.npy", "review_embeddings.npy"):
         emb_path = project_dir / fname
         if not emb_path.exists():
@@ -83,16 +142,15 @@ def data_loading(project_dir: str, load_val_or_test: str = "val"):
       - negative_edges.csv
       - neutral_edges.csv
       - edge_features.npy        (preferred, optional)
-      - review_embeddings.npy   (optional, aligned by row_index)
+      - review_embeddings.npy    (fallback, optional)
     """
-
     project_dir = Path(project_dir)
 
-    train_pos = _read_csv(project_dir / "train_edges.csv")
-    val_pos = _read_csv(project_dir / "val_edges.csv")
-    test_pos = _read_csv(project_dir / "test_edges.csv")
-    neg_df = _read_csv(project_dir / "negative_edges.csv")
-    neu_df = _read_csv(project_dir / "neutral_edges.csv")
+    train_pos = _canonicalize_edge_frame(_read_csv(project_dir / "train_edges.csv"))
+    val_pos = _canonicalize_edge_frame(_read_csv(project_dir / "val_edges.csv"))
+    test_pos = _canonicalize_edge_frame(_read_csv(project_dir / "test_edges.csv"))
+    neg_df = _canonicalize_edge_frame(_read_csv(project_dir / "negative_edges.csv"))
+    neu_df = _canonicalize_edge_frame(_read_csv(project_dir / "neutral_edges.csv"))
 
     user_encoder, item_encoder = _fit_label_encoders(train_pos, val_pos, test_pos, neg_df, neu_df)
 
@@ -102,13 +160,14 @@ def data_loading(project_dir: str, load_val_or_test: str = "val"):
     neg_df = _encode_ids(neg_df, user_encoder, item_encoder)
     neu_df = _encode_ids(neu_df, user_encoder, item_encoder)
 
-    embeddings = _load_edge_features(project_dir, n_rows=max(
-        train_pos["row_index"].max(),
-        val_pos["row_index"].max(),
-        test_pos["row_index"].max(),
-        neg_df["row_index"].max(),
-        neu_df["row_index"].max(),
-    ) + 1)
+    max_row_index = max(
+        int(train_pos["row_index"].max()),
+        int(val_pos["row_index"].max()),
+        int(test_pos["row_index"].max()),
+        int(neg_df["row_index"].max()),
+        int(neu_df["row_index"].max()),
+    )
+    embeddings = _load_edge_features(project_dir, n_rows=max_row_index + 1)
 
     data = HeteroData()
     data_neg = HeteroData()
@@ -143,13 +202,19 @@ def data_loading(project_dir: str, load_val_or_test: str = "val"):
 
     # Negative branch for autoencoder
     neg_edge_index = _make_edge_index(neg_df)
+    neg_edge_rate = torch.tensor(neg_df["rating:float"].values, dtype=torch.float)
     data_neg["user", "rates", "item"].edge_index = neg_edge_index
+    data_neg["user", "rates", "item"].edge_rate = neg_edge_rate
     data_neg["item", "rated_by", "user"].edge_index = neg_edge_index.flip([0])
+    data_neg["item", "rated_by", "user"].edge_rate = neg_edge_rate
 
-    # Neutral branch (kept for completeness / later ablation)
+    # Neutral branch
     neu_edge_index = _make_edge_index(neu_df)
+    neu_edge_rate = torch.tensor(neu_df["rating:float"].values, dtype=torch.float)
     data_neutral["user", "rates", "item"].edge_index = neu_edge_index
+    data_neutral["user", "rates", "item"].edge_rate = neu_edge_rate
     data_neutral["item", "rated_by", "user"].edge_index = neu_edge_index.flip([0])
+    data_neutral["item", "rated_by", "user"].edge_rate = neu_edge_rate
 
     # Validation / test: positive-only labels
     if load_val_or_test == "val":
