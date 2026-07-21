@@ -25,7 +25,8 @@ parser.add_argument('--layers', type=int, default=4)
 parser.add_argument('--learning_rate', type=float, default=0.001)
 parser.add_argument('--evaluation_step', type=int, default=1)
 parser.add_argument('--early_stopping_step', type=int, default=50)
-parser.add_argument('--top_k', type=list, default=[5,10,15,20])
+parser.add_argument('--project_dir', type=str, required=True)
+parser.add_argument('--top_k', nargs='+', type=int, default=[5,10,15,20])
 parser.add_argument('--epochs', type=int, default=1000)
 parser.add_argument('--real_neg_samp_prob', type=float, default=1.5, help='real_negative_sampling_probabilities')
 parser.add_argument('--path_name', type=str, default='nothing')
@@ -70,7 +71,7 @@ if args.dataset_augment == 'original':
     print('train set: train_original')
 else:
     print('train set: train_augment')
-data, data_neg, data_neutral = data_loader.data_loading(args.dataset, args.dataset_augment, 'val')
+data, data_neg, data_neutral = data_loader.data_loading(project_dir=args.project_dir, load_val_or_test='val')
 num_users, num_items = data['user'].num_nodes, data['item'].num_nodes
 data = data.to_homogeneous().to(device)
 data_neg = data_neg.to_homogeneous().to(device)
@@ -83,8 +84,7 @@ batch_size = args.batch_size
 test_batch_size = args.test_batch_size
 
 mask = data.edge_index[0] < data.edge_index[1]
-train_edge_label_index = data.edge_index[:, mask]
-train_edge_rate = data.edge_rate[mask]
+train_edge_label_index = data.edge_index[:, data.edge_index[0] < data.edge_index[1]]
 train_loader = torch.utils.data.DataLoader(
     range(train_edge_label_index.size(1)),
     shuffle=True,
@@ -96,12 +96,17 @@ train_neg_edge_label_index = data_neg.edge_index[:, mask_neg]
 mask_neutral = data_neutral.edge_index[0] < data_neutral.edge_index[1]
 train_neutral_edge_label_index = data_neutral.edge_index[:, mask_neutral]
 
+edge_attr_dim = 0
+if hasattr(data, "edge_attr") and data.edge_attr is not None:
+    edge_attr_dim = data.edge_attr.size(-1)
+
 model = ReFINe_plus(
     num_nodes=data.num_nodes,
     embedding_dim=args.embedding_dim,
     num_layers=args.layers,
     num_users=num_users,
     num_items=num_items,
+    edge_attr_dim=edge_attr_dim,
 ).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
@@ -117,29 +122,29 @@ def train():
     num_neg = num_items//10
 
     for index in train_loader:  #for index in tqdm(train_loader):
-        pos_neg_edge_label_index = train_edge_label_index[:, index]
-        pos_neg_edge_rate = train_edge_rate[index]
-
-        pos_index = torch.where(pos_neg_edge_rate >= 4)[0]
-        pos_edge_label_index = pos_neg_edge_label_index[:, pos_index]
-        neg_edge_label_index = torch.multinomial(negative_sampling_probabilities[pos_edge_label_index[0]], num_samples=num_neg, replacement=False) + num_users
-        out = model.get_embedding(data.edge_index)
+        out = model.get_embedding(
+            data.edge_index,
+            edge_attr=(data.edge_attr if hasattr(data, "edge_attr") else None),
+        )
+        
+        pos_edge_label_index = train_edge_label_index[:, index]
         out_src = out[pos_edge_label_index[0]]
         out_dst = out[pos_edge_label_index[1]]
+        
+        neg_edge_label_index = torch.multinomial(negative_sampling_probabilities[pos_edge_label_index[0]], num_samples=num_neg, replacement=False) + num_users
         out_dst_neg = out[neg_edge_label_index[1]]
+        
         pos_rank = torch.mul(out_src, out_dst).sum(dim=1)
         neg_rank = torch.mul(out_src.unsqueeze(dim=1), out_dst_neg).sum(dim=-1)
+        
         optimizer.zero_grad()
         loss = torch.log(1 + torch.exp(neg_rank - pos_rank.unsqueeze(dim=1)).sum(dim=1)).mean()
         lambda_reg = 1e-7
         reg_loss = model.embedding.weight.norm(p=2).pow(2)
         loss += (lambda_reg / 2) * reg_loss
 
-        neg_index = torch.where(pos_neg_edge_rate <= 1)[0]
-        neg_edge_label_index_ae = pos_neg_edge_label_index[:, neg_index]
-
-        ae_loss, user_latent, item_latent = model.compute_ae_loss(neg_edge_label_index_ae, device)
-        align_loss = model.compute_align_loss(data.edge_index, user_latent, item_latent)
+        ae_loss, user_latent, item_latent = model.compute_ae_loss(train_neg_edge_label_index, device)
+        align_loss = model.compute_align_loss(data.edge_index, user_latent, item_latent, edge_attr=(data.edge_attr if hasattr(data, "edge_attr") else None))
 
         loss += (ae_loss + align_loss)
         loss.backward()
@@ -154,7 +159,7 @@ def train():
 
 @torch.no_grad()
 def test(ks: list):
-    emb = model.get_embedding(data.edge_index)
+    emb = model.get_embedding(data.edge_index, edge_attr=(data.edge_attr if hasattr(data, "edge_attr") else None))
     user_emb, item_emb = emb[:num_users], emb[num_users:]
 
     results = list()
@@ -257,7 +262,7 @@ if not early_stopping.early_stop:
     print("Early stopping does not trigger.")
 
 else:
-    data, _, _ = data_loader.data_loading(args.dataset, args.dataset_augment, 'test')
+    data, _, _ = data_loader.data_loading(project_dir=args.project_dir, load_val_or_test='test')
     num_users, num_items = data['user'].num_nodes, data['item'].num_nodes
     data = data.to_homogeneous().to(device)
 
@@ -277,5 +282,3 @@ else:
                       f'NDCG@{k}: {ndcg:.4f}')
     print('#############################################################################')
 
-
-exit()
