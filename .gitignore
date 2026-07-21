@@ -5,10 +5,14 @@ __pycache__/
 # Virtual env
 env/
 venv/
+.venv/
 .refine/
 
 # VSCode
 .vscode/
+
+# Jupyter
+.ipynb_checkpoints/
 
 # PyTorch models
 *.pt
@@ -20,11 +24,26 @@ dataset/
 data/
 *.inter
 *.item
+*.json.gz
+*.jsonl
+*.csv
 
 # Logs
 results4comparison/
+result/
 *.log
 
 # OS
 .DS_Store
 Thumbs.db
+
+# generated files
+*.npy
+*.npz
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.h5
+*.pkl
+*.joblib

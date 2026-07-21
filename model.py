@@ -12,7 +12,7 @@ from torch_geometric.utils import is_sparse, to_edge_index
 
 
 class ReFINe_plus(torch.nn.Module):
-    def __init__(self, num_nodes: int, embedding_dim: int, num_layers: int, num_users: int, num_items: int, alpha: Optional[Union[float, Tensor]] = None, **kwargs):
+    def __init__(self, num_nodes: int, embedding_dim: int, num_layers: int, num_users: int, num_items: int, edge_attr_dim: int = 0, alpha: Optional[Union[float, Tensor]] = None, **kwargs):
         super().__init__()
 
         self.num_nodes = num_nodes
@@ -53,6 +53,14 @@ class ReFINe_plus(torch.nn.Module):
             ReLU(),
             Linear(self.hidden_dim, num_users),
             Sigmoid())
+        
+        self.edge_attr_proj = None
+        if edge_attr_dim and edge_attr_dim > 0:
+            self.edge_attr_proj = Sequential(
+                Linear(edge_attr_dim, embedding_dim),
+                ReLU(),
+                Linear(embedding_dim, 1),
+            )
 
         self.reset_parameters()
 
@@ -75,7 +83,10 @@ class ReFINe_plus(torch.nn.Module):
             if isinstance(layer, Linear):
                 torch.nn.init.xavier_uniform_(layer.weight)
 
-    def get_embedding(self, edge_index: Adj, edge_weight: OptTensor = None) -> Tensor:
+    def get_embedding(self, edge_index: Adj, edge_weight: OptTensor = None, edge_attr: OptTensor = None) -> Tensor:
+        if edge_weight is None and edge_attr is not None and self.edge_attr_proj is not None:
+            edge_weight = self.edge_attr_to_weight(edge_attr)
+            
         x = self.embedding.weight
         out = x * self.alpha[0]
 
@@ -85,14 +96,14 @@ class ReFINe_plus(torch.nn.Module):
 
         return out
 
-    def forward(self, edge_index: Adj, edge_label_index: OptTensor = None, edge_weight: OptTensor = None) -> Tensor:
+    def forward(self, edge_index: Adj, edge_label_index: OptTensor = None, edge_weight: OptTensor = None, edge_attr: OptTensor = None) -> Tensor:
         if edge_label_index is None:
             if is_sparse(edge_index):
                 edge_label_index, _ = to_edge_index(edge_index)
             else:
                 edge_label_index = edge_index
 
-        out = self.get_embedding(edge_index, edge_weight)
+        out = self.get_embedding(edge_index, edge_weight, edge_attr=edge_attr)
 
         out_src = out[edge_label_index[0]]
         out_dst = out[edge_label_index[1]]
@@ -167,11 +178,16 @@ class ReFINe_plus(torch.nn.Module):
 
         return ae_loss, user_latent, item_latent
 
-    def compute_align_loss(self, edge_index: Adj, user_latent: Tensor, item_latent: Tensor):
-        emb = self.get_embedding(edge_index)
+    def compute_align_loss(self, edge_index: Adj, user_latent: Tensor, item_latent: Tensor, edge_attr: OptTensor = None):
+        emb = self.get_embedding(edge_index, edge_attr=edge_attr)
         user_emb, item_emb = emb[:self.num_users], emb[self.num_users:]
         align_loss = F.mse_loss(user_emb, user_latent) + F.mse_loss(item_emb, item_latent)
         return align_loss
+
+    def edge_attr_to_weight(self, edge_attr: Tensor) -> Tensor:
+        if self.edge_attr_proj is None:
+            return None
+        return torch.nn.functional.softplus(self.edge_attr_proj(edge_attr)).squeeze(-1)
 
     def __repr__(self) -> str:
         return (f'{self.__class__.__name__}({self.num_nodes}, '
