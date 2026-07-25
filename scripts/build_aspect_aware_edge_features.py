@@ -2,7 +2,6 @@
 import argparse
 import json
 import re
-import shutil
 from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -176,7 +175,7 @@ def load_text_embeddings(
         candidate_paths.append(text_embedding_file)
     else:
         candidate_paths.extend(
-            [output_dir / "review_embeddings_text_only.npy", output_dir / "review_embeddings.npy", output_dir / "text_embeddings.npy"]
+            [output_dir / "review_embeddings_text_only.npy", output_dir / "text_embeddings.npy"]
         )
 
     for p in candidate_paths:
@@ -245,17 +244,17 @@ def build_aspect_matrix(
             idx = aspect_vocab[asp]
             score = int(a["score"])
             score = 1 if score > 0 else (-1 if score < 0 else 0)
+            confidence = float(a.get("confidence", 0.0))
+            weighted = score * confidence
+
             if score == 0:
                 continue
 
-            prev = matrix[row_index, idx]
-            if prev == 0:
-                matrix[row_index, idx] = float(score)
-            elif prev == score:
-                pass
-            else:
-                # conflicting polarity for the same aspect in one review -> neutralize
-                matrix[row_index, idx] = 0.0
+            matrix[row_index, idx] = np.clip(
+                matrix[row_index, idx] + weighted,
+                -1.0,
+                1.0
+            )
 
             row_updates.append((asp, score))
 
@@ -359,12 +358,11 @@ def main():
     )
 
     review_embeddings_path = output_dir / "review_embeddings.npy"
-    backup_path = output_dir / "review_embeddings_text_only.npy"
-    if review_embeddings_path.exists() and not backup_path.exists():
-        shutil.copy2(review_embeddings_path, backup_path)
 
-    np.save(output_dir / "edge_features.npy", combined)
-    np.save(review_embeddings_path, combined)
+    np.save(review_embeddings_path, text_embeddings.astype(np.float32, copy=False))
+    np.save(output_dir / "review_embeddings_text_only.npy", text_embeddings.astype(np.float32, copy=False))
+    
+    np.save(output_dir / "edge_features.npy", combined.astype(np.float32, copy=False))
     np.save(output_dir / "aspect_vector_matrix.npy", aspect_matrix.astype(np.float32, copy=False))
 
     manifest = {
@@ -381,9 +379,6 @@ def main():
 
     if not debug_df.empty:
         debug_df.to_csv(output_dir / "aspect_vector_debug.csv", index=False, encoding="utf-8-sig")
-
-    if computed_flag:
-        np.save(output_dir / "review_embeddings_text_only.npy", text_embeddings.astype(np.float32, copy=False))
 
     print("Embedding build done.")
     print(f"Text dim: {text_embeddings.shape[1]}")
