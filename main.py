@@ -102,6 +102,7 @@ edge_attr_dim = 0
 if hasattr(data, "edge_attr") and data.edge_attr is not None:
     edge_attr_dim = data.edge_attr.size(-1)
 
+
 model = ReFINe_plus(
     num_nodes=data.num_nodes,
     embedding_dim=args.embedding_dim,

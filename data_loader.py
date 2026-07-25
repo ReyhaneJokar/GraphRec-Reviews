@@ -88,6 +88,7 @@ def _load_edge_features(project_dir: Path, n_rows: int) -> Optional[np.ndarray]:
             raise ValueError(
                 f"{emb_path} has {emb.shape[0]} rows but input needs at least {n_rows}"
             )
+        
         return emb
 
     return None

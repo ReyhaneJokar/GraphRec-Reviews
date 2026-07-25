@@ -23,14 +23,16 @@ class ReFINe_plus(torch.nn.Module):
         self.hidden_dim = 600
 
         if alpha is None:
-            alpha = 1. / (num_layers + 1)
+            alpha = torch.ones(num_layers + 1, dtype=torch.float)
 
         if isinstance(alpha, Tensor):
             assert alpha.size(0) == num_layers + 1
-        else:
-            alpha = torch.tensor([alpha] * (num_layers + 1))
-        self.register_buffer('alpha', alpha)
+            alpha = alpha.float()
 
+        else:
+            alpha = torch.tensor([alpha] * (num_layers + 1), dtype=torch.float)
+        self.alpha = torch.nn.Parameter(alpha)
+        
         self.embedding = Embedding(num_nodes, embedding_dim)
         self.convs = ModuleList([LGConv(**kwargs) for _ in range(num_layers)])
 
@@ -57,7 +59,10 @@ class ReFINe_plus(torch.nn.Module):
         self.edge_attr_proj = None
         if edge_attr_dim and edge_attr_dim > 0:
             self.edge_attr_proj = Sequential(
-                Linear(edge_attr_dim, embedding_dim),
+                Linear(edge_attr_dim, self.hidden_dim),
+                ReLU(),
+                torch.nn.Dropout(0.2),
+                Linear(self.hidden_dim, embedding_dim),
                 ReLU(),
                 Linear(embedding_dim, 1),
             )
@@ -82,17 +87,24 @@ class ReFINe_plus(torch.nn.Module):
         for layer in self.item_decoder:
             if isinstance(layer, Linear):
                 torch.nn.init.xavier_uniform_(layer.weight)
+        if self.edge_attr_proj is not None:
+            for layer in self.edge_attr_proj:
+                if isinstance(layer, Linear):
+                    torch.nn.init.xavier_uniform_(layer.weight)
+                    if layer.bias is not None:
+                        torch.nn.init.zeros_(layer.bias)
 
     def get_embedding(self, edge_index: Adj, edge_weight: OptTensor = None, edge_attr: OptTensor = None) -> Tensor:
         if edge_weight is None and edge_attr is not None and self.edge_attr_proj is not None:
             edge_weight = self.edge_attr_to_weight(edge_attr)
-            
+        
+        alpha = torch.softmax(self.alpha, dim=0)
         x = self.embedding.weight
-        out = x * self.alpha[0]
+        out = x * alpha[0]
 
         for i in range(self.num_layers):
             x = self.convs[i](x, edge_index, edge_weight)
-            out = out + x * self.alpha[i + 1]
+            out = out + x * alpha[i + 1]
 
         return out
 
@@ -187,7 +199,7 @@ class ReFINe_plus(torch.nn.Module):
     def edge_attr_to_weight(self, edge_attr: Tensor) -> Tensor:
         if self.edge_attr_proj is None:
             return None
-        return torch.nn.functional.softplus(self.edge_attr_proj(edge_attr)).squeeze(-1)
+        return torch.sigmoid(self.edge_attr_proj(edge_attr)).squeeze(-1)
 
     def __repr__(self) -> str:
         return (f'{self.__class__.__name__}({self.num_nodes}, '
