@@ -32,6 +32,13 @@ parser.add_argument('--top_k', nargs='+', type=int, default=[5, 10, 15, 20])
 parser.add_argument('--epochs', type=int, default=1000)
 parser.add_argument('--real_neg_samp_prob', type=float, default=1.5, help='real_negative_sampling_probabilities')
 parser.add_argument('--path_name', type=str, default='nothing')
+parser.add_argument('--disable_edge_content', action='store_true',
+                    help='Freeze edge_feat_scale at 0 to isolate whether the base/plus gap '
+                    'comes from content injection or from harness-level effects (RNG shift, etc).')
+parser.add_argument('--no_edge_features', action='store_true',
+                    help='Force edge_attr_dim=0 for a clean vanilla-LightGCN baseline.')
+parser.add_argument('--grad_clip_norm', type=float, default=0.0,
+                    help='Max grad norm for clipping. 0 disables clipping entirely.')
 args = parser.parse_args()
 #############################################################################
 
@@ -98,10 +105,12 @@ train_neg_edge_label_index = data_neg.edge_index[:, mask_neg]
 mask_neutral = data_neutral.edge_index[0] < data_neutral.edge_index[1]
 train_neutral_edge_label_index = data_neutral.edge_index[:, mask_neutral]
 
+if args.no_edge_features and hasattr(data, "edge_attr"):
+    del data.edge_attr
+
 edge_attr_dim = 0
 if hasattr(data, "edge_attr") and data.edge_attr is not None:
     edge_attr_dim = data.edge_attr.size(-1)
-
 
 model = ReFINe_plus(
     num_nodes=data.num_nodes,
@@ -111,6 +120,16 @@ model = ReFINe_plus(
     num_items=num_items,
     edge_attr_dim=edge_attr_dim,
 ).to(device)
+
+if edge_attr_dim > 0:
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+if args.disable_edge_content and model.edge_feat_scale is not None:
+    model.edge_feat_scale.data.zero_()
+    model.edge_feat_scale.requires_grad_(False)
+
 optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
 negative_sampling_probabilities = torch.ones(num_users, num_items, device=device)
@@ -121,6 +140,7 @@ negative_sampling_probabilities[train_neg_edge_label_index[0], train_neg_edge_la
 mse_loss = MSELoss()
 
 def train():
+    model.train()
     total_loss = total_examples = 0
     num_neg = num_items // 10
 
@@ -151,15 +171,12 @@ def train():
         loss += (lambda_reg / 2) * reg_loss
 
         ae_loss, user_latent, item_latent = model.compute_ae_loss(train_neg_edge_label_index, device)
-        align_loss = model.compute_align_loss(
-            data.edge_index,
-            user_latent,
-            item_latent,
-            edge_attr=(data.edge_attr if hasattr(data, "edge_attr") else None)
-        )
+        align_loss = model.compute_align_loss(out, user_latent, item_latent)
 
         loss += (ae_loss + align_loss)
         loss.backward()
+        if args.grad_clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip_norm)
         optimizer.step()
 
         total_loss += float(loss) * pos_rank.numel()
@@ -170,6 +187,7 @@ def train():
 
 @torch.no_grad()
 def test(ks: list):
+    model.eval()
     emb = model.get_embedding(
         data.edge_index,
         edge_attr=(data.edge_attr if hasattr(data, "edge_attr") else None)
@@ -266,6 +284,18 @@ for epoch in range(1, args.epochs + 1):
                           f'Recall@{k}: {recall:.4f}, '
                           f'NDCG@{k}: {ndcg:.4f}')
             break
+
+        if hasattr(data, "edge_attr") and data.edge_attr is not None and model.edge_attr_proj is not None:
+            with torch.no_grad():
+                raw = model.edge_attr_proj(data.edge_attr[:2000])
+                norms = raw.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+                directions = raw / norms
+                mean_dir = directions.mean(dim=0, keepdim=True)
+                mean_dir = mean_dir / mean_dir.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+                cos_sim = (directions * mean_dir).sum(dim=-1)
+            print(f"  edge feat:   scale={model.edge_feat_scale.item():.4f}")
+            print(f"  direction cos-sim to mean: mean={cos_sim.mean().item():.4f}, std={cos_sim.std().item():.4f}")
+
 
 end_time = time.time()
 training_time = end_time - start_time
