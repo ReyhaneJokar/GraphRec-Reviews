@@ -6,10 +6,32 @@ from torch import Tensor
 from torch.nn import Embedding, ModuleList, Sequential, Linear, ReLU, Sigmoid
 from torch.nn.modules.loss import _Loss
 
-from torch_geometric.nn.conv import LGConv
+from torch_geometric.nn.conv import LGConv, MessagePassing
+from torch_geometric.nn.conv.gcn_conv import gcn_norm
 from torch_geometric.typing import Adj, OptTensor
 from torch_geometric.utils import is_sparse, to_edge_index
 
+class EdgeAwareLGConv(MessagePassing):
+    """
+    LightGCN propagation with an additive content term. `edge_weight` is
+    the standard structural normalization (D^-1/2 A D^-1/2) and scales the
+    neighbor embedding exactly as vanilla LightGCN does. `edge_feat` -- a
+    projected vector from the review's text+aspect features -- is ADDED to
+    that scaled message, letting content inject new information into the
+    message instead of only rescaling existing structural signal (which is
+    what the scalar gate did, and which repeatedly collapsed to a constant).
+    """
+    def __init__(self):
+        super().__init__(aggr='add')
+
+    def forward(self, x: Tensor, edge_index: Adj, edge_weight: OptTensor = None, edge_feat: OptTensor = None) -> Tensor:
+        return self.propagate(edge_index, x=x, edge_weight=edge_weight, edge_feat=edge_feat)
+
+    def message(self, x_j: Tensor, edge_weight: OptTensor, edge_feat: OptTensor) -> Tensor:
+        msg = x_j if edge_weight is None else edge_weight.view(-1, 1) * x_j
+        if edge_feat is not None:
+            msg = msg + edge_feat
+        return msg
 
 class ReFINe_plus(torch.nn.Module):
     def __init__(self, num_nodes: int, embedding_dim: int, num_layers: int, num_users: int, num_items: int, edge_attr_dim: int = 0, alpha: Optional[Union[float, Tensor]] = None, **kwargs):
@@ -34,7 +56,7 @@ class ReFINe_plus(torch.nn.Module):
         self.alpha = torch.nn.Parameter(alpha)
         
         self.embedding = Embedding(num_nodes, embedding_dim)
-        self.convs = ModuleList([LGConv(**kwargs) for _ in range(num_layers)])
+        self.convs = ModuleList([EdgeAwareLGConv() for _ in range(num_layers)])
 
         self.user_encoder = Sequential(
             Linear(num_items, self.hidden_dim),
@@ -57,15 +79,18 @@ class ReFINe_plus(torch.nn.Module):
             Sigmoid())
         
         self.edge_attr_proj = None
+        self.edge_feat_scale = None
         if edge_attr_dim and edge_attr_dim > 0:
+            proj_hidden_dim = embedding_dim * 2
             self.edge_attr_proj = Sequential(
-                Linear(edge_attr_dim, self.hidden_dim),
+                torch.nn.LayerNorm(edge_attr_dim),
+                Linear(edge_attr_dim, proj_hidden_dim),
+                torch.nn.LayerNorm(proj_hidden_dim),
                 ReLU(),
-                torch.nn.Dropout(0.2),
-                Linear(self.hidden_dim, embedding_dim),
-                ReLU(),
-                Linear(embedding_dim, 1),
+                torch.nn.Dropout(0.1),
+                Linear(proj_hidden_dim, embedding_dim),
             )
+            self.edge_feat_scale = torch.nn.Parameter(torch.tensor(0.0))
 
         self.reset_parameters()
 
@@ -87,26 +112,40 @@ class ReFINe_plus(torch.nn.Module):
         for layer in self.item_decoder:
             if isinstance(layer, Linear):
                 torch.nn.init.xavier_uniform_(layer.weight)
+                
         if self.edge_attr_proj is not None:
             for layer in self.edge_attr_proj:
                 if isinstance(layer, Linear):
                     torch.nn.init.xavier_uniform_(layer.weight)
                     if layer.bias is not None:
                         torch.nn.init.zeros_(layer.bias)
-
+                        
     def get_embedding(self, edge_index: Adj, edge_weight: OptTensor = None, edge_attr: OptTensor = None) -> Tensor:
-        if edge_weight is None and edge_attr is not None and self.edge_attr_proj is not None:
-            edge_weight = self.edge_attr_to_weight(edge_attr)
-        
+        edge_feat = None
+        if edge_weight is None:
+            edge_index, edge_weight = gcn_norm(
+                edge_index, None, self.num_nodes,
+                add_self_loops=False, dtype=self.embedding.weight.dtype,
+            )
+        if edge_attr is not None and self.edge_attr_proj is not None:
+            edge_feat = self.compute_edge_feat(edge_attr)       
+             
         alpha = torch.softmax(self.alpha, dim=0)
         x = self.embedding.weight
         out = x * alpha[0]
 
         for i in range(self.num_layers):
-            x = self.convs[i](x, edge_index, edge_weight)
+            x = self.convs[i](x, edge_index, edge_weight, edge_feat=edge_feat)
             out = out + x * alpha[i + 1]
 
         return out
+
+    def compute_edge_feat(self, edge_attr: Tensor) -> Tensor:
+        if self.edge_attr_proj is None:
+            return None
+        raw = self.edge_attr_proj(edge_attr)
+        raw = F.normalize(raw, p=2, dim=-1)
+        return self.edge_feat_scale * raw
 
     def forward(self, edge_index: Adj, edge_label_index: OptTensor = None, edge_weight: OptTensor = None, edge_attr: OptTensor = None) -> Tensor:
         if edge_label_index is None:
@@ -190,8 +229,7 @@ class ReFINe_plus(torch.nn.Module):
 
         return ae_loss, user_latent, item_latent
 
-    def compute_align_loss(self, edge_index: Adj, user_latent: Tensor, item_latent: Tensor, edge_attr: OptTensor = None):
-        emb = self.get_embedding(edge_index, edge_attr=edge_attr)
+    def compute_align_loss(self, emb: Tensor, user_latent: Tensor, item_latent: Tensor):
         user_emb, item_emb = emb[:self.num_users], emb[self.num_users:]
         align_loss = F.mse_loss(user_emb, user_latent) + F.mse_loss(item_emb, item_latent)
         return align_loss
