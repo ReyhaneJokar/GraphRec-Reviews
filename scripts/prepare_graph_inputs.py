@@ -158,6 +158,61 @@ def chronological_split(df: pd.DataFrame, user_col: str = "user_id", time_col: s
 
     return _concat(train_parts), _concat(val_parts), _concat(test_parts)
 
+def enforce_positive_train_coverage(
+    df: pd.DataFrame,
+    min_user_interactions: int = 3,
+    max_iter: int = 30,
+) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    df = df.copy()
+    df["user_id"] = df["user_id"].astype(str)
+    df["item_id"] = df["item_id"].astype(str)
+
+    if "is_positive" not in df.columns:
+        raise ValueError("enforce_positive_train_coverage requires an 'is_positive' column.")
+
+    iterations = 0
+    for iteration in range(1, max_iter + 1):
+        before = len(df)
+
+        # Users need enough history for the leave-one/two-out split to
+        # even produce a train prefix.
+        df = df.groupby("user_id", group_keys=False).filter(
+            lambda g: len(g) >= min_user_interactions
+        ).copy()
+        if df.empty:
+            raise ValueError("All users were removed during positive-coverage filtering.")
+
+        train_probe, _, _ = chronological_split(df)
+        train_positive_probe = train_probe[train_probe["is_positive"]]
+
+        if train_positive_probe.empty:
+            raise ValueError(
+                "No positive interactions remain in the train prefix. "
+                "Check the sentiment classification output or lower min_user_interactions."
+            )
+
+        covered_users = set(train_positive_probe["user_id"].astype(str).unique())
+        covered_items = set(train_positive_probe["item_id"].astype(str).unique())
+
+        new_df = df[
+            df["user_id"].astype(str).isin(covered_users)
+            & df["item_id"].astype(str).isin(covered_items)
+        ].copy()
+
+        after = len(new_df)
+        print(f"positive-coverage iteration {iteration}: {before} -> {after}")
+        iterations = iteration
+        df = new_df
+
+        if after == before:
+            break
+
+    df = df.groupby("user_id", group_keys=False).filter(
+        lambda g: len(g) >= min_user_interactions
+    ).copy()
+
+    return df, {"iterations": iterations}
+
 
 def try_make_embeddings(texts: List[str], model_name: str, batch_size: int = 32) -> Optional[np.ndarray]:
     try:
@@ -188,6 +243,7 @@ def main():
     parser.add_argument("--embed_model", default="", help="Optional sentence-transformers model name, e.g. all-MiniLM-L6-v2")
     parser.add_argument("--embed_batch_size", type=int, default=32)
     parser.add_argument("--max_review_chars", type=int, default=1500)
+    parser.add_argument("--min_user_interactions", type=int, default=3)
     args = parser.parse_args()
 
     sentiment_path = Path(args.sentiment_csv)
@@ -212,18 +268,23 @@ def main():
     df["review_text"] = df.apply(build_review_text, axis=1)
     df["review_text"] = df["review_text"].astype(str).str.slice(0, args.max_review_chars)
 
-    # Normalize fields that later code will consume.
     for col in ["user_id", "item_id", "sentiment", "review_summary", "text", "evidence", "error"]:
         if col in df.columns:
             df[col] = df[col].astype(str)
 
-    user_map, item_map = make_user_item_maps(df)
-    df["user_idx"] = df["user_id"].astype(str).map(user_map)
-    df["item_idx"] = df["item_id"].astype(str).map(item_map)
-
     df["is_positive"] = df["sentiment"].astype(str).str.lower().eq("positive")
     df["is_negative"] = df["sentiment"].astype(str).str.lower().eq("negative")
     df["is_neutral"] = df["sentiment"].astype(str).str.lower().eq("neutral")
+
+    total_reviews_raw = len(df)
+
+    df, coverage_stats = enforce_positive_train_coverage(
+        df, min_user_interactions=args.min_user_interactions
+    )
+
+    user_map, item_map = make_user_item_maps(df)
+    df["user_idx"] = df["user_id"].astype(str).map(user_map)
+    df["item_idx"] = df["item_id"].astype(str).map(item_map)
 
     merged_path = out_dir / "all_edges_merged.csv"
     df.to_csv(merged_path, index=False, encoding="utf-8-sig")
@@ -286,9 +347,28 @@ def main():
     pd.DataFrame(aspect_instances).to_csv(out_dir / "positive_aspect_instances.csv", index=False, encoding="utf-8-sig")
 
     train_df, val_df, test_df = chronological_split(df)
-    train_df.to_csv(out_dir / "train_edges.csv", index=False, encoding="utf-8-sig")
-    val_df.to_csv(out_dir / "val_edges.csv", index=False, encoding="utf-8-sig")
-    test_df.to_csv(out_dir / "test_edges.csv", index=False, encoding="utf-8-sig")
+
+    train_positive_df = train_df[train_df["is_positive"]].copy()
+    val_positive_df = val_df[val_df["is_positive"]].copy()
+    test_positive_df = test_df[test_df["is_positive"]].copy()
+    train_negative_df = train_df[train_df["is_negative"]].copy()
+    train_neutral_df = train_df[train_df["is_neutral"]].copy()
+
+    train_positive_df.to_csv(out_dir / "train_edges.csv", index=False, encoding="utf-8-sig")
+    val_positive_df.to_csv(out_dir / "val_edges.csv", index=False, encoding="utf-8-sig")
+    test_positive_df.to_csv(out_dir / "test_edges.csv", index=False, encoding="utf-8-sig")
+    train_negative_df.to_csv(out_dir / "negative_edges.csv", index=False, encoding="utf-8-sig")
+    train_neutral_df.to_csv(out_dir / "neutral_edges.csv", index=False, encoding="utf-8-sig")
+
+    # ---- sanity check: coverage filter must have eliminated cold nodes ----
+    zero_pos_users = set(df["user_id"].astype(str).unique()) - set(train_positive_df["user_id"].astype(str).unique())
+    zero_pos_items = set(df["item_id"].astype(str).unique()) - set(train_positive_df["item_id"].astype(str).unique())
+    if zero_pos_users or zero_pos_items:
+        raise AssertionError(
+            f"Coverage filter failed to converge: "
+            f"{len(zero_pos_users)} users and {len(zero_pos_items)} items "
+            f"still have zero positive train edges."
+        )
 
     embeddings = None
     if args.embed_model:
@@ -333,16 +413,25 @@ def main():
     df.to_csv(graph_ready_path, index=False, encoding="utf-8-sig")
 
     stats = {
-        "total_reviews": int(len(df)),
-        "positive_reviews": int(df["is_positive"].sum()),
-        "negative_reviews": int(df["is_negative"].sum()),
-        "neutral_reviews": int(df["is_neutral"].sum()),
+        "total_reviews_raw": int(total_reviews_raw),
+        "total_reviews_after_coverage_filter": int(len(df)),
+        "coverage_filter_iterations": int(coverage_stats["iterations"]),
+        "positive_reviews_total": int(df["is_positive"].sum()),
+        "negative_reviews_total": int(df["is_negative"].sum()),
+        "neutral_reviews_total": int(df["is_neutral"].sum()),
         "num_users": int(df["user_idx"].nunique()),
         "num_items": int(df["item_idx"].nunique()),
         "num_aspects": int(len(aspect_vocab)),
-        "train_rows": int(len(train_df)),
-        "val_rows": int(len(val_df)),
-        "test_rows": int(len(test_df)),
+        "train_rows_raw": int(len(train_df)),
+        "val_rows_raw": int(len(val_df)),
+        "test_rows_raw": int(len(test_df)),
+        "train_edges_positive": int(len(train_positive_df)),
+        "val_edges_positive": int(len(val_positive_df)),
+        "test_edges_positive": int(len(test_positive_df)),
+        "negative_edges_train_only": int(len(train_negative_df)),
+        "neutral_edges_train_only": int(len(train_neutral_df)),
+        "users_with_zero_positive_train_edges": int(len(zero_pos_users)),
+        "items_with_zero_positive_train_edges": int(len(zero_pos_items)),
         "embeddings_generated": bool(embeddings is not None),
         "embed_model": args.embed_model if args.embed_model else None,
     }
@@ -355,12 +444,15 @@ def main():
         json.dump(item_map, f, ensure_ascii=False, indent=2)
 
     print("Done.")
+    print("Coverage filter iterations:", coverage_stats["iterations"])
     print("Saved:", merged_path)
     print("Saved:", graph_ready_path)
     print("Saved:", out_dir / "positive_absa_edges.csv")
     print("Saved:", out_dir / "train_edges.csv")
     print("Saved:", out_dir / "val_edges.csv")
     print("Saved:", out_dir / "test_edges.csv")
+    print("Saved:", out_dir / "negative_edges.csv")
+    print("Saved:", out_dir / "neutral_edges.csv")
     print("Saved:", out_dir / "aspect_vocab.json")
     print("Saved:", out_dir / "graph_stats.json")
     if embeddings is not None:
