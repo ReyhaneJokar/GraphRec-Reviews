@@ -32,13 +32,10 @@ parser.add_argument('--top_k', nargs='+', type=int, default=[5, 10, 15, 20])
 parser.add_argument('--epochs', type=int, default=1000)
 parser.add_argument('--real_neg_samp_prob', type=float, default=1.5, help='real_negative_sampling_probabilities')
 parser.add_argument('--path_name', type=str, default='nothing')
-parser.add_argument('--disable_edge_content', action='store_true',
-                    help='Freeze edge_feat_scale at 0 to isolate whether the base/plus gap '
-                    'comes from content injection or from harness-level effects (RNG shift, etc).')
-parser.add_argument('--no_edge_features', action='store_true',
-                    help='Force edge_attr_dim=0 for a clean vanilla-LightGCN baseline.')
-parser.add_argument('--grad_clip_norm', type=float, default=0.0,
-                    help='Max grad norm for clipping. 0 disables clipping entirely.')
+parser.add_argument('--disable_edge_content', action='store_true', help='Freeze edge_feat_scale at 0 to isolate whether the base/plus gap comes from content injection or from harness-level effects (RNG shift, etc).')
+parser.add_argument('--no_edge_features', action='store_true', help='Force edge_attr_dim=0 for a clean vanilla-LightGCN baseline.')
+parser.add_argument('--grad_clip_norm', type=float, default=0.0, help='Max grad norm for clipping. 0 disables clipping entirely.')
+parser.add_argument('--fixed_alpha', action='store_true', help='Freeze layer-combination weights at 1/(L+1) (non-trainable), matching the original base ReFINe_plus model.py, instead of the learnable softmax-normalized alpha.')
 args = parser.parse_args()
 #############################################################################
 
@@ -119,6 +116,7 @@ model = ReFINe_plus(
     num_users=num_users,
     num_items=num_items,
     edge_attr_dim=edge_attr_dim,
+    learnable_alpha=not args.fixed_alpha,
 ).to(device)
 
 if edge_attr_dim > 0:
@@ -293,7 +291,8 @@ for epoch in range(1, args.epochs + 1):
                 mean_dir = directions.mean(dim=0, keepdim=True)
                 mean_dir = mean_dir / mean_dir.norm(dim=-1, keepdim=True).clamp_min(1e-8)
                 cos_sim = (directions * mean_dir).sum(dim=-1)
-            print(f"  edge feat:   scale={model.edge_feat_scale.item():.4f}")
+            scale_str = ", ".join(f"L{i}={v:.4f}" for i, v in enumerate(model.edge_feat_scale.detach().cpu().tolist()))
+            print(f"  edge feat scale per layer: {scale_str}")
             print(f"  direction cos-sim to mean: mean={cos_sim.mean().item():.4f}, std={cos_sim.std().item():.4f}")
 
 
