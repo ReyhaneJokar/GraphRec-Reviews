@@ -28,13 +28,18 @@ class EdgeAwareLGConv(MessagePassing):
         return self.propagate(edge_index, x=x, edge_weight=edge_weight, edge_feat=edge_feat)
 
     def message(self, x_j: Tensor, edge_weight: OptTensor, edge_feat: OptTensor) -> Tensor:
-        msg = x_j if edge_weight is None else edge_weight.view(-1, 1) * x_j
+        if edge_weight is None:
+            msg = x_j
+            if edge_feat is not None:
+                msg = msg + edge_feat
+            return msg
+        msg = edge_weight.view(-1, 1) * x_j
         if edge_feat is not None:
-            msg = msg + edge_feat
+            msg = msg + edge_weight.view(-1, 1) * edge_feat
         return msg
 
 class ReFINe_plus(torch.nn.Module):
-    def __init__(self, num_nodes: int, embedding_dim: int, num_layers: int, num_users: int, num_items: int, edge_attr_dim: int = 0, alpha: Optional[Union[float, Tensor]] = None, **kwargs):
+    def __init__(self, num_nodes: int, embedding_dim: int, num_layers: int, num_users: int, num_items: int, edge_attr_dim: int = 0, alpha: Optional[Union[float, Tensor]] = None, learnable_alpha: bool = True, **kwargs):
         super().__init__()
 
         self.num_nodes = num_nodes
@@ -43,9 +48,13 @@ class ReFINe_plus(torch.nn.Module):
         self.num_users = num_users
         self.num_items = num_items
         self.hidden_dim = 600
+        self.learnable_alpha = learnable_alpha
 
         if alpha is None:
-            alpha = torch.ones(num_layers + 1, dtype=torch.float)
+            if learnable_alpha:
+                alpha = torch.ones(num_layers + 1, dtype=torch.float)
+            else:
+                alpha = torch.full((num_layers + 1,), 1.0 / (num_layers + 1), dtype=torch.float)
 
         if isinstance(alpha, Tensor):
             assert alpha.size(0) == num_layers + 1
@@ -53,8 +62,12 @@ class ReFINe_plus(torch.nn.Module):
 
         else:
             alpha = torch.tensor([alpha] * (num_layers + 1), dtype=torch.float)
-        self.alpha = torch.nn.Parameter(alpha)
-        
+
+        if learnable_alpha:
+            self.alpha = torch.nn.Parameter(alpha)
+        else:
+            self.register_buffer('alpha', alpha)   
+     
         self.embedding = Embedding(num_nodes, embedding_dim)
         self.convs = ModuleList([EdgeAwareLGConv() for _ in range(num_layers)])
 
@@ -90,7 +103,7 @@ class ReFINe_plus(torch.nn.Module):
                 torch.nn.Dropout(0.1),
                 Linear(proj_hidden_dim, embedding_dim),
             )
-            self.edge_feat_scale = torch.nn.Parameter(torch.tensor(0.0))
+            self.edge_feat_scale = torch.nn.Parameter(torch.zeros(num_layers))
 
         self.reset_parameters()
 
@@ -121,31 +134,33 @@ class ReFINe_plus(torch.nn.Module):
                         torch.nn.init.zeros_(layer.bias)
                         
     def get_embedding(self, edge_index: Adj, edge_weight: OptTensor = None, edge_attr: OptTensor = None) -> Tensor:
-        edge_feat = None
+        edge_feat_dir = None
         if edge_weight is None:
             edge_index, edge_weight = gcn_norm(
                 edge_index, None, self.num_nodes,
                 add_self_loops=False, dtype=self.embedding.weight.dtype,
             )
         if edge_attr is not None and self.edge_attr_proj is not None:
-            edge_feat = self.compute_edge_feat(edge_attr)       
+            edge_feat_dir = self.compute_edge_feat_direction(edge_attr)
              
-        alpha = torch.softmax(self.alpha, dim=0)
+        alpha = torch.softmax(self.alpha, dim=0) if self.learnable_alpha else self.alpha
         x = self.embedding.weight
         out = x * alpha[0]
 
         for i in range(self.num_layers):
-            x = self.convs[i](x, edge_index, edge_weight, edge_feat=edge_feat)
+            edge_feat_i = None
+            if edge_feat_dir is not None:
+                edge_feat_i = self.edge_feat_scale[i] * edge_feat_dir
+            x = self.convs[i](x, edge_index, edge_weight, edge_feat=edge_feat_i)
             out = out + x * alpha[i + 1]
 
         return out
 
-    def compute_edge_feat(self, edge_attr: Tensor) -> Tensor:
+    def compute_edge_feat_direction(self, edge_attr: Tensor) -> Tensor:
         if self.edge_attr_proj is None:
             return None
         raw = self.edge_attr_proj(edge_attr)
-        raw = F.normalize(raw, p=2, dim=-1)
-        return self.edge_feat_scale * raw
+        return F.normalize(raw, p=2, dim=-1)
 
     def forward(self, edge_index: Adj, edge_label_index: OptTensor = None, edge_weight: OptTensor = None, edge_attr: OptTensor = None) -> Tensor:
         if edge_label_index is None:
