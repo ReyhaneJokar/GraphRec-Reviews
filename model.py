@@ -13,29 +13,38 @@ from torch_geometric.utils import is_sparse, to_edge_index
 
 class EdgeAwareLGConv(MessagePassing):
     """
-    LightGCN propagation with an additive content term. `edge_weight` is
-    the standard structural normalization (D^-1/2 A D^-1/2) and scales the
-    neighbor embedding exactly as vanilla LightGCN does. `edge_feat` -- a
-    projected vector from the review's text+aspect features -- is ADDED to
-    that scaled message, letting content inject new information into the
-    message instead of only rescaling existing structural signal (which is
-    what the scalar gate did, and which repeatedly collapsed to a constant).
+    LightGCN propagation with a GATED additive content term. The gate is
+    computed per-edge, per-layer from [x_j, edge_feat_dir] -- i.e. the
+    model can learn "this neighbor's review content is trustworthy here"
+    vs. "ignore it", instead of one global scalar applied identically to
+    every edge (which had no way to distinguish a useful review from a
+    noisy one and simply drifted to ~1.0 for all layers/edges).
     """
-    def __init__(self):
+    def __init__(self, embedding_dim: int = 0, use_gate: bool = False):
         super().__init__(aggr='add')
+        self.gate_mlp = None
+        if use_gate and embedding_dim > 0:
+            self.gate_mlp = Sequential(
+                Linear(embedding_dim * 2, embedding_dim // 2),
+                ReLU(),
+                torch.nn.Dropout(0.2),
+                Linear(embedding_dim // 2, 1),
+            )
+            torch.nn.init.zeros_(self.gate_mlp[-1].weight)
+            torch.nn.init.constant_(self.gate_mlp[-1].bias, -4.0)
 
     def forward(self, x: Tensor, edge_index: Adj, edge_weight: OptTensor = None, edge_feat: OptTensor = None) -> Tensor:
         return self.propagate(edge_index, x=x, edge_weight=edge_weight, edge_feat=edge_feat)
 
     def message(self, x_j: Tensor, edge_weight: OptTensor, edge_feat: OptTensor) -> Tensor:
-        if edge_weight is None:
-            msg = x_j
-            if edge_feat is not None:
-                msg = msg + edge_feat
-            return msg
-        msg = edge_weight.view(-1, 1) * x_j
+        msg = x_j if edge_weight is None else edge_weight.view(-1, 1) * x_j
         if edge_feat is not None:
-            msg = msg + edge_weight.view(-1, 1) * edge_feat
+            if self.gate_mlp is not None:
+                gate = torch.sigmoid(self.gate_mlp(torch.cat([x_j, edge_feat], dim=-1)))
+                content = gate * edge_feat
+            else:
+                content = edge_feat
+            msg = msg + (content if edge_weight is None else edge_weight.view(-1, 1) * content)
         return msg
 
 class ReFINe_plus(torch.nn.Module):
@@ -69,7 +78,10 @@ class ReFINe_plus(torch.nn.Module):
             self.register_buffer('alpha', alpha)   
      
         self.embedding = Embedding(num_nodes, embedding_dim)
-        self.convs = ModuleList([EdgeAwareLGConv() for _ in range(num_layers)])
+        self.convs = ModuleList([
+            EdgeAwareLGConv(embedding_dim=embedding_dim, use_gate=(edge_attr_dim > 0))
+            for _ in range(num_layers)
+        ])
 
         self.user_encoder = Sequential(
             Linear(num_items, self.hidden_dim),
@@ -92,7 +104,6 @@ class ReFINe_plus(torch.nn.Module):
             Sigmoid())
         
         self.edge_attr_proj = None
-        self.edge_feat_scale = None
         if edge_attr_dim and edge_attr_dim > 0:
             proj_hidden_dim = embedding_dim * 2
             self.edge_attr_proj = Sequential(
@@ -103,8 +114,7 @@ class ReFINe_plus(torch.nn.Module):
                 torch.nn.Dropout(0.1),
                 Linear(proj_hidden_dim, embedding_dim),
             )
-            self.edge_feat_scale = torch.nn.Parameter(torch.zeros(num_layers))
-
+        self.content_enabled = True
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -148,16 +158,30 @@ class ReFINe_plus(torch.nn.Module):
         out = x * alpha[0]
 
         for i in range(self.num_layers):
-            edge_feat_i = None
-            if edge_feat_dir is not None:
-                edge_feat_i = self.edge_feat_scale[i] * edge_feat_dir
-            x = self.convs[i](x, edge_index, edge_weight, edge_feat=edge_feat_i)
+            x = self.convs[i](x, edge_index, edge_weight, edge_feat=edge_feat_dir)
             out = out + x * alpha[i + 1]
 
         return out
 
+    def content_parameters(self):
+        """Parameters belonging only to the review-content injection path
+        (edge_attr_proj + per-layer gate MLPs), regularized separately in
+        main.py's train() loop so tightening this doesn't disturb the
+        base embedding's own regularization."""
+        params = []
+        if self.edge_attr_proj is not None:
+            params += list(self.edge_attr_proj.parameters())
+        for conv in self.convs:
+            if conv.gate_mlp is not None:
+                params += list(conv.gate_mlp.parameters())
+        return params
+
+
     def compute_edge_feat_direction(self, edge_attr: Tensor) -> Tensor:
-        if self.edge_attr_proj is None:
+        """L2-normalized content direction per edge; layer-independent.
+        Each layer's own gate (in EdgeAwareLGConv) decides, per edge, how
+        much of this direction to use."""
+        if self.edge_attr_proj is None or not self.content_enabled:
             return None
         raw = self.edge_attr_proj(edge_attr)
         return F.normalize(raw, p=2, dim=-1)

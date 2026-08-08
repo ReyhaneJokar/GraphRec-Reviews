@@ -35,6 +35,8 @@ parser.add_argument('--path_name', type=str, default='nothing')
 parser.add_argument('--disable_edge_content', action='store_true', help='Freeze edge_feat_scale at 0 to isolate whether the base/plus gap comes from content injection or from harness-level effects (RNG shift, etc).')
 parser.add_argument('--no_edge_features', action='store_true', help='Force edge_attr_dim=0 for a clean vanilla-LightGCN baseline.')
 parser.add_argument('--grad_clip_norm', type=float, default=0.0, help='Max grad norm for clipping. 0 disables clipping entirely.')
+parser.add_argument('--content_reg_weight', type=float, default=1e-4, help='L2 weight decay applied only to the review-content injection path (edge_attr_proj + per-layer gate MLPs), to curb overfitting from the added capacity relative to the base embedding regularization.')
+parser.add_argument('--early_stop_metric', type=str, default='recall', choices=['recall', 'ndcg', 'combined'], help='Metric used for best-checkpoint selection / early stopping (at the largest top_k). Default matches all prior experiments in this project (recall@max_k).')
 parser.add_argument('--fixed_alpha', action='store_true', help='Freeze layer-combination weights at 1/(L+1) (non-trainable), matching the original base ReFINe_plus model.py, instead of the learnable softmax-normalized alpha.')
 args = parser.parse_args()
 #############################################################################
@@ -124,9 +126,8 @@ if edge_attr_dim > 0:
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-if args.disable_edge_content and model.edge_feat_scale is not None:
-    model.edge_feat_scale.data.zero_()
-    model.edge_feat_scale.requires_grad_(False)
+if args.disable_edge_content:
+    model.content_enabled = False
 
 optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
@@ -167,6 +168,12 @@ def train():
         lambda_reg = 1e-7
         reg_loss = model.embedding.weight.norm(p=2).pow(2)
         loss += (lambda_reg / 2) * reg_loss
+        
+        if args.content_reg_weight > 0:
+            content_params = model.content_parameters()
+            if content_params:
+                content_reg_loss = sum(p.norm(2).pow(2) for p in content_params)
+                loss += (args.content_reg_weight / 2) * content_reg_loss
 
         ae_loss, user_latent, item_latent = model.compute_ae_loss(train_neg_edge_label_index, device)
         align_loss = model.compute_align_loss(out, user_latent, item_latent)
@@ -246,7 +253,7 @@ if not os.path.exists('result/' + args.dataset):
     os.makedirs('result/' + args.dataset)
 
 path_name = 'result/' + args.dataset + '/' + args.path_name + '.pt'
-early_stopping = utils.EarlyStopping(patience=args.early_stopping_step, verbose=True, path=path_name)
+early_stopping = utils.EarlyStopping(patience=args.early_stopping_step, verbose=True, path=path_name, score_metric=args.early_stop_metric)
 
 topks = args.top_k
 start_time = time.time()
@@ -291,8 +298,16 @@ for epoch in range(1, args.epochs + 1):
                 mean_dir = directions.mean(dim=0, keepdim=True)
                 mean_dir = mean_dir / mean_dir.norm(dim=-1, keepdim=True).clamp_min(1e-8)
                 cos_sim = (directions * mean_dir).sum(dim=-1)
-            scale_str = ", ".join(f"L{i}={v:.4f}" for i, v in enumerate(model.edge_feat_scale.detach().cpu().tolist()))
-            print(f"  edge feat scale per layer: {scale_str}")
+                
+            with torch.no_grad():
+                sample_attr = data.edge_attr[:2000]
+                sample_dst = data.edge_index[1, :2000]
+                x_sample = model.embedding.weight[sample_dst]
+                edge_feat_sample = model.compute_edge_feat_direction(sample_attr)
+                gate0 = torch.sigmoid(model.convs[0].gate_mlp(torch.cat([x_sample, edge_feat_sample], dim=-1)))
+                gate_last = torch.sigmoid(model.convs[-1].gate_mlp(torch.cat([x_sample, edge_feat_sample], dim=-1)))
+            print(f"  gate layer0: mean={gate0.mean().item():.4f}, std={gate0.std().item():.4f}")
+            print(f"  gate layerN: mean={gate_last.mean().item():.4f}, std={gate_last.std().item():.4f}")
             print(f"  direction cos-sim to mean: mean={cos_sim.mean().item():.4f}, std={cos_sim.std().item():.4f}")
 
 
