@@ -36,6 +36,7 @@ parser.add_argument('--disable_edge_content', action='store_true', help='Freeze 
 parser.add_argument('--no_edge_features', action='store_true', help='Force edge_attr_dim=0 for a clean vanilla-LightGCN baseline.')
 parser.add_argument('--grad_clip_norm', type=float, default=0.0, help='Max grad norm for clipping. 0 disables clipping entirely.')
 parser.add_argument('--content_reg_weight', type=float, default=1e-4, help='L2 weight decay applied only to the review-content injection path (edge_attr_proj + per-layer gate MLPs), to curb overfitting from the added capacity relative to the base embedding regularization.')
+parser.add_argument('--early_stop_metric', type=str, default='recall', choices=['recall', 'ndcg', 'combined'], help='Metric used for best-checkpoint selection / early stopping (at the largest top_k). Default matches all prior experiments in this project (recall@max_k).')
 parser.add_argument('--fixed_alpha', action='store_true', help='Freeze layer-combination weights at 1/(L+1) (non-trainable), matching the original base ReFINe_plus model.py, instead of the learnable softmax-normalized alpha.')
 args = parser.parse_args()
 #############################################################################
@@ -252,7 +253,7 @@ if not os.path.exists('result/' + args.dataset):
     os.makedirs('result/' + args.dataset)
 
 path_name = 'result/' + args.dataset + '/' + args.path_name + '.pt'
-early_stopping = utils.EarlyStopping(patience=args.early_stopping_step, verbose=True, path=path_name)
+early_stopping = utils.EarlyStopping(patience=args.early_stopping_step, verbose=True, path=path_name, score_metric=args.early_stop_metric)
 
 topks = args.top_k
 start_time = time.time()

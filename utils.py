@@ -2,7 +2,7 @@ import torch
 import numpy as np
 
 class EarlyStopping:
-    def __init__(self, patience=50, verbose=False, delta=0, path=None):
+    def __init__(self, patience=50, verbose=False, delta=0, path=None, score_metric='recall'):
         self.patience = patience
         self.verbose = verbose
         self.delta = delta
@@ -12,9 +12,20 @@ class EarlyStopping:
         self.best_epoch = None
         self.best_metrics = None
         self.path = path
+        self.score_metric = score_metric  # 'recall' | 'ndcg' | 'combined'
+        
+    def _compute_score(self, metrics):
+        precision, recall, ndcg = metrics[-1]  # last k in top_k list (e.g. k=20)
+        if self.score_metric == 'recall':
+            return recall
+        if self.score_metric == 'ndcg':
+            return ndcg
+        if self.score_metric == 'combined':
+            return (recall + ndcg) / 2.0
+        raise ValueError(f"Unknown score_metric: {self.score_metric}")
 
     def __call__(self, epoch, metrics, model=None):
-        score = metrics[-1][1] # recall@20
+        score = self._compute_score(metrics)
 
         if self.best_score is None:
             self.best_score = score
