@@ -308,7 +308,6 @@ def main():
     aspects_by_row = load_absa_sources(output_dir, absa_jsonl, absa_csv)
     aspect_vocab, aspect_counter = build_aspect_vocab(aspects_by_row, min_freq=args.min_aspect_freq)
 
-    # Always save a lightweight report of the aspect frequencies.
     freq_report = pd.DataFrame(
         [
             {"aspect": asp, "count": int(cnt), "kept": bool(cnt >= args.min_aspect_freq)}
