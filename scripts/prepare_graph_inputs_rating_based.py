@@ -352,32 +352,17 @@ def main():
 
     train_df, val_df, test_df = chronological_split(df)
 
-    # IMPORTANT (reverted from an earlier, incorrect version of this file):
-    # train_edges.csv is the LightGCN message-passing graph
-    # (data["user","rates","item"].edge_index in data_loader.py). Per the
-    # project design (proposal.md, sec. 3) and Jeong & Cho's ReFINe++
-    # architecture, LightGCN's neighborhood-aggregation step assumes
-    # homophily, which only holds for POSITIVE interactions. Negative
-    # feedback is deliberately kept OUT of this graph and is instead routed
-    # only to the autoencoder branch (negative_edges.csv -> data_neg),
-    # which is built for reconstructing/denoising dispreference signal
-    # without polluting the positive-correlation graph. Mixing negative
-    # edges into edge_index (an earlier version of this script did this to
-    # mirror the historical data_loader.py) was empirically confirmed to
-    # make results WORSE than baseline, consistent with the homophily
-    # argument -- so it must not be done.
     train_positive_df = train_df[train_df["is_positive"]].copy()
     val_positive_df = val_df[val_df["is_positive"]].copy()
     test_positive_df = test_df[test_df["is_positive"]].copy()
     train_negative_df = train_df[train_df["is_negative"]].copy()
     train_neutral_df = train_df[train_df["is_neutral"]].copy()
 
-    assert (train_positive_df["rating_numeric"] >= 4).all(), "train_edges.csv باید فقط rating>=4 باشد"
-    assert (val_positive_df["rating_numeric"] >= 4).all(), "val_edges.csv باید فقط rating>=4 باشد"
-    assert (test_positive_df["rating_numeric"] >= 4).all(), "test_edges.csv باید فقط rating>=4 باشد"
-    assert (train_negative_df["rating_numeric"] <= 1).all(), "negative_edges.csv باید فقط rating<=1 باشد"
-    assert train_negative_df.index.isin(train_positive_df.index).sum() == 0, \
-        "negative_edges.csv نباید با train_edges.csv (مثبت) همپوشانی داشته باشد"
+    assert (train_positive_df["rating_numeric"] >= 4).all(), "train_edges.csv should be just rating>=4"
+    assert (val_positive_df["rating_numeric"] >= 4).all(), "val_edges.csv should be just rating>=4"
+    assert (test_positive_df["rating_numeric"] >= 4).all(), "test_edges.csv should be just rating>=4"
+    assert (train_negative_df["rating_numeric"] <= 1).all(), "negative_edges.csv should be just rating<=1"
+    assert train_negative_df.index.isin(train_positive_df.index).sum() == 0, "negative_edges.csv should not overlap with train_edges.csv (positive)"
 
     train_positive_df.to_csv(out_dir / "train_edges.csv", index=False, encoding="utf-8-sig")
     val_positive_df.to_csv(out_dir / "val_edges.csv", index=False, encoding="utf-8-sig")

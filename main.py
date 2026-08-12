@@ -16,12 +16,12 @@ import data_loader, utils
 
 #############################################################################
 parser = argparse.ArgumentParser()
-parser.add_argument('--random_seed', type=int, default=2024)
-parser.add_argument('--gpu_id', type=int, default=2)
+parser.add_argument('--random_seed', type=int, default=7)
+parser.add_argument('--gpu_id', type=int, default=0)
 parser.add_argument('--dataset', type=str, default='ML-100K')
-parser.add_argument('--dataset_augment', type=str, default='augment')
-parser.add_argument('--batch_size', type=int, default=1024)
-parser.add_argument('--test_batch_size', type=int, default=8192)
+parser.add_argument('--dataset_augment', type=str, default='original')
+parser.add_argument('--batch_size', type=int, default=512)
+parser.add_argument('--test_batch_size', type=int, default=4096)
 parser.add_argument('--embedding_dim', type=int, default=64)
 parser.add_argument('--layers', type=int, default=4)
 parser.add_argument('--learning_rate', type=float, default=0.001)
@@ -34,10 +34,12 @@ parser.add_argument('--real_neg_samp_prob', type=float, default=1.5, help='real_
 parser.add_argument('--path_name', type=str, default='nothing')
 parser.add_argument('--disable_edge_content', action='store_true', help='Freeze edge_feat_scale at 0 to isolate whether the base/plus gap comes from content injection or from harness-level effects (RNG shift, etc).')
 parser.add_argument('--no_edge_features', action='store_true', help='Force edge_attr_dim=0 for a clean vanilla-LightGCN baseline.')
-parser.add_argument('--grad_clip_norm', type=float, default=0.0, help='Max grad norm for clipping. 0 disables clipping entirely.')
-parser.add_argument('--content_reg_weight', type=float, default=1e-4, help='L2 weight decay applied only to the review-content injection path (edge_attr_proj + per-layer gate MLPs), to curb overfitting from the added capacity relative to the base embedding regularization.')
-parser.add_argument('--early_stop_metric', type=str, default='recall', choices=['recall', 'ndcg', 'combined'], help='Metric used for best-checkpoint selection / early stopping (at the largest top_k). Default matches all prior experiments in this project (recall@max_k).')
+parser.add_argument('--grad_clip_norm', type=float, default=5.0, help='Max grad norm for clipping. 0 disables clipping entirely.')
+parser.add_argument('--content_reg_weight', type=float, default=0.0005, help='L2 weight decay applied only to the review-content injection path (edge_attr_proj + per-layer gate MLPs), to curb overfitting from the added capacity relative to the base embedding regularization.')
+parser.add_argument('--early_stop_metric', type=str, default='combined', choices=['recall', 'ndcg', 'combined'], help='Metric used for best-checkpoint selection / early stopping (at the largest top_k). Default matches all prior experiments in this project (recall@max_k).')
 parser.add_argument('--fixed_alpha', action='store_true', help='Freeze layer-combination weights at 1/(L+1) (non-trainable), matching the original base ReFINe_plus model.py, instead of the learnable softmax-normalized alpha.')
+parser.add_argument('--neg_confidence_weights_path', type=str, default=None, help='Path to per-negative confidence weights (.npy), aligned with negative_edges.csv.')
+# parser.add_argument('--neg_confidence_default_weight', type=float, default=1.0, help='Weight assigned to sampled items that are not explicitly present in negative_edges.csv.')
 args = parser.parse_args()
 #############################################################################
 
@@ -101,6 +103,13 @@ train_loader = torch.utils.data.DataLoader(
 mask_neg = data_neg.edge_index[0] < data_neg.edge_index[1]
 train_neg_edge_label_index = data_neg.edge_index[:, mask_neg]
 
+neg_confidence_matrix = None
+if args.neg_confidence_weights_path:
+    w_prime = np.load(args.neg_confidence_weights_path)
+    w_prime_t = torch.tensor(w_prime, dtype=torch.float, device=device)
+    neg_confidence_matrix = torch.ones(num_users, num_items, device=device)
+    neg_confidence_matrix[train_neg_edge_label_index[0], train_neg_edge_label_index[1] - num_users] = w_prime_t
+
 mask_neutral = data_neutral.edge_index[0] < data_neutral.edge_index[1]
 train_neutral_edge_label_index = data_neutral.edge_index[:, mask_neutral]
 
@@ -162,9 +171,17 @@ def train():
 
         pos_rank = torch.mul(out_src, out_dst).sum(dim=1)
         neg_rank = torch.mul(out_src.unsqueeze(dim=1), out_dst_neg).sum(dim=-1)
-
         optimizer.zero_grad()
-        loss = torch.log(1 + torch.exp(neg_rank - pos_rank.unsqueeze(dim=1)).sum(dim=1)).mean()
+        
+        if neg_confidence_matrix is not None:
+            neg_items_local = neg_edge_label_index[1] - num_users
+            sample_w = neg_confidence_matrix[pos_edge_label_index[0][1], neg_items_local]  # scalar per neg item -> (num_neg,)
+            exp_term = sample_w.unsqueeze(0) * torch.exp(neg_rank - pos_rank.unsqueeze(dim=1))
+        else:
+            exp_term = torch.exp(neg_rank - pos_rank.unsqueeze(dim=1))
+
+        loss = torch.log(1 + exp_term.sum(dim=1)).mean()
+        
         lambda_reg = 1e-7
         reg_loss = model.embedding.weight.norm(p=2).pow(2)
         loss += (lambda_reg / 2) * reg_loss
