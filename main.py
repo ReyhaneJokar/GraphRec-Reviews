@@ -39,7 +39,6 @@ parser.add_argument('--content_reg_weight', type=float, default=0.0005, help='L2
 parser.add_argument('--early_stop_metric', type=str, default='combined', choices=['recall', 'ndcg', 'combined'], help='Metric used for best-checkpoint selection / early stopping (at the largest top_k). Default matches all prior experiments in this project (recall@max_k).')
 parser.add_argument('--fixed_alpha', action='store_true', help='Freeze layer-combination weights at 1/(L+1) (non-trainable), matching the original base ReFINe_plus model.py, instead of the learnable softmax-normalized alpha.')
 parser.add_argument('--neg_confidence_weights_path', type=str, default=None, help='Path to per-negative confidence weights (.npy), aligned with negative_edges.csv.')
-# parser.add_argument('--neg_confidence_default_weight', type=float, default=1.0, help='Weight assigned to sampled items that are not explicitly present in negative_edges.csv.')
 args = parser.parse_args()
 #############################################################################
 
