@@ -22,6 +22,7 @@ venv/
 # Dataset
 dataset/
 data/
+cache/
 *.inter
 *.item
 *.json.gz
