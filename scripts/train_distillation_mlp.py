@@ -188,75 +188,32 @@ def train_one_fold(
 def main():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        "--distill_dataset",
-        required=True,
+    parser.add_argument("--distill_dataset", required=True,)
+    parser.add_argument("--sample_frac", type=float, required=True,)
+    parser.add_argument("--feature_set", choices=["simple", "full"], default="simple",)
+    parser.add_argument("--n_folds", type=int, default=5,)
+    parser.add_argument("--epochs", type=int, default=300,)
+    parser.add_argument("--patience", type=int, default=30,)
+    parser.add_argument("--lr", type=float, default=1e-3,)
+    parser.add_argument("--weight_decay", type=float, default=1e-3,)
+    parser.add_argument("--weight_floor", type=float, default=1.0,
+        help="Final weight when negative_confidence=0, i.e. the LLM/MLP thinks "
+             "this 'confirmed negative' is probably NOT a genuine dislike. "
+             "Default 1.0 = treat it no worse than a generic unrated/unknown "
+             "item (matches negative_sampling_probabilities' default elsewhere "
+             "in main.py). Do not set below 1.0 unless you deliberately want "
+             "unreliable-looking confirmed negatives penalized below unknowns.",
     )
-
-    parser.add_argument(
-        "--sample_frac",
-        type=float,
-        required=True,
+    parser.add_argument("--weight_ceiling", type=float, default=1.5,
+        help="Final weight when negative_confidence=1 (fully trusted genuine "
+             "dislike). MUST match --real_neg_samp_prob of the main.py run this "
+             "feeds into (--neg_confidence_weights_path), or you silently make "
+             "the confidence-weighted run weaker/stronger on negative feedback "
+             "than the non-distilled baseline you are comparing it against.",
     )
-
-    parser.add_argument(
-        "--feature_set",
-        choices=["simple", "full"],
-        default="simple",
-    )
-
-    parser.add_argument(
-        "--n_folds",
-        type=int,
-        default=5,
-    )
-
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=300,
-    )
-
-    parser.add_argument(
-        "--patience",
-        type=int,
-        default=30,
-    )
-
-    parser.add_argument(
-        "--lr",
-        type=float,
-        default=1e-3,
-    )
-
-    parser.add_argument(
-        "--weight_decay",
-        type=float,
-        default=1e-3,
-    )
-
-    parser.add_argument(
-        "--epsilon",
-        type=float,
-        default=0.1,
-    )
-
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=2024,
-    )
-
-    parser.add_argument(
-        "--output_weights",
-        required=True,
-    )
-
-    parser.add_argument(
-        "--output_model",
-        default=None,
-    )
-
+    parser.add_argument("--seed", type=int, default=1337,)
+    parser.add_argument("--output_weights", required=True,)
+    parser.add_argument("--output_model", default=None,)
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -419,24 +376,19 @@ def main():
     print("=" * 80)
     print(f"OOF MSE: {oof_mse:.6f}")
     print(f"Mean baseline MSE: {baseline_mse:.6f}")
-    print(
-        f"Improvement over mean baseline: "
-        f"{improvement:.2f}%"
-    )
-    print(
-        f"Fold MSE mean: "
-        f"{np.mean(fold_losses):.6f}"
-    )
-    print(
-        f"Fold MSE std: "
-        f"{np.std(fold_losses):.6f}"
-    )
+    print(f"Improvement over mean baseline: "f"{improvement:.2f}%")
+    if improvement < 0:
+        print(
+            "[WARN] Negative improvement -- the model is doing WORSE than "
+            "predicting the constant mean for every sample. Its per-edge "
+            "predictions carry no reliable signal yet; treat the resulting "
+            "weights as close to a uniform discount, not real differentiation. "
+            "Consider: more labeled samples, fewer features (try --feature_set "
+            "simple), or heavier regularization before trusting --feature_set full."
+        )
+    print(f"Fold MSE mean: "f"{np.mean(fold_losses):.6f}")
+    print(f"Fold MSE std: "f"{np.std(fold_losses):.6f}")
     print("=" * 80)
-
-    X_all_t = torch.tensor(
-        X_all,
-        dtype=torch.float32,
-    )
 
     all_predictions = []
 
@@ -491,8 +443,8 @@ def main():
             ]
 
     final_weight = (
-        args.epsilon
-        + (1.0 - args.epsilon)
+        args.weight_floor
+        + (args.weight_ceiling - args.weight_floor)
         * final_weight
     )
 
@@ -507,25 +459,15 @@ def main():
     )
 
     print()
-    print(
-        f"Saved weights for "
-        f"{len(final_weight)} negative edges:"
-    )
+    print(f"Saved weights for "f"{len(final_weight)} negative edges:")
     print(output_weights)
 
-    print(
-        f"mean w'={final_weight.mean():.6f}"
-    )
-    print(
-        f"std w'={final_weight.std():.6f}"
-    )
+    print(f"mean w'={final_weight.mean():.6f}")
+    print(f"std w'={final_weight.std():.6f}")
 
     if args.output_model:
         model_path = Path(args.output_model)
-        model_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        model_path.parent.mkdir(parents=True, exist_ok=True,)
 
         joblib.dump(
             {
@@ -533,16 +475,15 @@ def main():
                 "feature_set": args.feature_set,
                 "models": fold_models,
                 "scalers": fold_scalers,
-                "epsilon": args.epsilon,
+                "weight_floor": args.weight_floor,
+                "weight_ceiling": args.weight_ceiling,
                 "seed": args.seed,
                 "sample_frac": args.sample_frac,
             },
             model_path,
         )
 
-        print(
-            f"Saved student ensemble: {model_path}"
-        )
+        print(f"Saved student ensemble: {model_path}")
 
 
 if __name__ == "__main__":
