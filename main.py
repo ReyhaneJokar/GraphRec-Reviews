@@ -39,6 +39,9 @@ parser.add_argument('--content_reg_weight', type=float, default=0.0005, help='L2
 parser.add_argument('--early_stop_metric', type=str, default='combined', choices=['recall', 'ndcg', 'combined'], help='Metric used for best-checkpoint selection / early stopping (at the largest top_k). Default matches all prior experiments in this project (recall@max_k).')
 parser.add_argument('--fixed_alpha', action='store_true', help='Freeze layer-combination weights at 1/(L+1) (non-trainable), matching the original base ReFINe_plus model.py, instead of the learnable softmax-normalized alpha.')
 parser.add_argument('--neg_confidence_weights_path', type=str, default=None, help='Path to per-negative confidence weights (.npy), aligned with negative_edges.csv.')
+parser.add_argument('--eval_protocol', type=str, default='full', choices=['full', 'sampled99'], help='full = rank against the entire item catalog (default; used for all prior Musical Instruments/Digital Music results). sampled99 = 1 positive + N sampled negatives per test user (DualGCN/NCF-style leave-one-out, needed to compare against DualGCN Table 5).')
+parser.add_argument('--eval_neg_samples', type=int, default=99, help='Number of sampled negatives per test user under --eval_protocol sampled99.')
+parser.add_argument('--eval_sample_seed', type=int, default=42, help='Seed for the sampled negative candidate pool. Keep this FIXED and identical across every method/seed you compare on the same dataset -- otherwise each run ranks against a different random 100-item pool and differences stop being attributable to the model.')
 args = parser.parse_args()
 #############################################################################
 
@@ -142,7 +145,6 @@ optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 negative_sampling_probabilities = torch.ones(num_users, num_items, device=device)
 negative_sampling_probabilities[train_edge_label_index[0], train_edge_label_index[1]-num_users] = 0
 negative_sampling_probabilities[train_neg_edge_label_index[0], train_neg_edge_label_index[1]-num_users] = args.real_neg_samp_prob
-# negative_sampling_probabilities[train_neutral_edge_label_index[0], train_neutral_edge_label_index[1]-num_users] = 1.  # cj neutral
 
 mse_loss = MSELoss()
 
@@ -263,6 +265,63 @@ def test(ks: list):
     return results
 
 
+@torch.no_grad()
+def test_sampled(ks: list, num_negatives: int = 99, sample_seed: int = 42):
+    """DualGCN/NCF-style leave-one-out evaluation: rank each user's single
+    test-positive item against `num_negatives` sampled negatives (excluding
+    anything seen in train_pos/train_neg/train_neutral for that user), not
+    the full catalog. NOT numerically comparable to test()'s full-ranking
+    numbers -- only use this to reproduce a paper using this exact protocol."""
+    model.eval()
+    emb = model.get_embedding(
+        data.edge_index,
+        edge_attr=(data.edge_attr if hasattr(data, "edge_attr") else None)
+    )
+    user_emb, item_emb = emb[:num_users], emb[num_users:]
+
+    seen = [set() for _ in range(num_users)]
+    for eidx in (train_edge_label_index, train_neg_edge_label_index, train_neutral_edge_label_index):
+        for u, i in zip(eidx[0].tolist(), (eidx[1] - num_users).tolist()):
+            seen[u].add(i)
+
+    test_users = data.edge_label_index[0].tolist()
+    test_items = (data.edge_label_index[1] - num_users).tolist()
+
+    rng = random.Random(sample_seed)
+    ranks = []
+
+    for u, pos_i in zip(test_users, test_items):
+        excluded = seen[u] | {pos_i}
+        negs = []
+        while len(negs) < num_negatives:
+            cand = rng.randrange(num_items)
+            if cand not in excluded and cand not in negs:
+                negs.append(cand)
+
+        cand_idx = torch.tensor([pos_i] + negs, dtype=torch.long, device=item_emb.device)
+        scores = (user_emb[u] * item_emb[cand_idx]).sum(dim=-1)
+        order = torch.argsort(scores, descending=True)
+        rank_of_pos = (order == 0).nonzero(as_tuple=True)[0].item()
+        ranks.append(rank_of_pos)
+
+    ranks_t = torch.tensor(ranks, dtype=torch.float)
+    results = list()
+    for k in ks:
+        hit = (ranks_t < k).float()
+        precision = (hit / k).mean().item()
+        recall = hit.mean().item()
+        ndcg = (hit / torch.log2(ranks_t + 2.0)).mean().item()
+        results.append((precision, recall, ndcg))
+
+    return results
+
+
+def evaluate(ks: list):
+    if args.eval_protocol == 'sampled99':
+        return test_sampled(ks, num_negatives=args.eval_neg_samples, sample_seed=args.eval_sample_seed)
+    return test(ks=ks)
+
+
 if not os.path.exists('result'):
     os.makedirs('result')
 if not os.path.exists('result/' + args.dataset):
@@ -277,7 +336,7 @@ for epoch in range(1, args.epochs + 1):
     loss = train()
 
     if epoch % args.evaluation_step == 0:
-        results = test(ks=topks)
+        results = evaluate(ks=topks)
 
         print(f'\nEpoch: {epoch:03d}, '
               f'Loss: {loss:.4f}')
@@ -356,7 +415,7 @@ data = data.to_homogeneous().to(device)
 model.eval()
 print('\n#############################################################################')
 print('Final Test Results')
-results = test(ks=topks)
+results = evaluate(ks=topks)
 
 metrics_dict = {}
 for k, (precision, recall, ndcg) in zip(topks, results):

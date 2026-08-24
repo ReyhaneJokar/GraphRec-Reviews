@@ -15,20 +15,6 @@ from model import ReFINe_plus
 
 
 def infer_checkpoint_edge_dim(state_dict):
-    """
-    Infer the edge feature input dimension directly from checkpoint
-    without constructing the model first.
-
-    Supports the current architecture where:
-      edge_attr_proj.0 = LayerNorm(edge_attr_dim)
-      edge_attr_proj.1 = Linear(edge_attr_dim, hidden)
-
-    Also supports an older architecture where:
-      edge_attr_proj.0 = Linear(hidden, edge_attr_dim)
-    """
-
-    # Current architecture:
-    # LayerNorm(edge_attr_dim).weight -> [edge_attr_dim]
     key = "edge_attr_proj.0.weight"
     if key in state_dict:
         shape = tuple(state_dict[key].shape)
@@ -41,17 +27,13 @@ def infer_checkpoint_edge_dim(state_dict):
             return int(shape[1])
 
     # Fallback: inspect first 2D edge projection layer.
-    candidates = [
-        "edge_attr_proj.1.weight",
-        "edge_attr_proj.0.weight",
-    ]
+    candidates = ["edge_attr_proj.1.weight", "edge_attr_proj.0.weight"]
 
     for key in candidates:
         if key not in state_dict:
             continue
 
         shape = tuple(state_dict[key].shape)
-
         if len(shape) == 2:
             return int(shape[1])
 
@@ -62,17 +44,11 @@ def infer_checkpoint_embedding_dim(state_dict):
     key = "embedding.weight"
 
     if key not in state_dict:
-        raise RuntimeError(
-            "Cannot infer embedding dimension: "
-            "'embedding.weight' not found in checkpoint."
-        )
+        raise RuntimeError("Cannot infer embedding dimension: 'embedding.weight' not found in checkpoint.")
 
     shape = tuple(state_dict[key].shape)
-
     if len(shape) != 2:
-        raise RuntimeError(
-            f"Unexpected embedding.weight shape: {shape}"
-        )
+        raise RuntimeError(f"Unexpected embedding.weight shape: {shape}")
 
     return int(shape[1])
 
@@ -90,58 +66,35 @@ def infer_checkpoint_num_layers(state_dict):
                 layer_ids.add(int(parts[1]))
 
     if not layer_ids:
-        raise RuntimeError(
-            "Could not infer number of GNN layers from checkpoint."
-        )
+        raise RuntimeError("Could not infer number of GNN layers from checkpoint.")
 
     return max(layer_ids) + 1
 
 
 def load_explicit_text_edge_features(project_dir: Path, embedding_file: Path):
-    """
-    Load text-only review embeddings explicitly.
-
-    We do NOT use data_loader._load_edge_features(), because it prefers
-    edge_features.npy, which belongs to the old ABSA experiment.
-
-    The embedding rows are aligned using row_index from train_edges.csv.
-    """
     if not embedding_file.is_absolute():
         embedding_file = project_dir / embedding_file
 
     if not embedding_file.exists():
-        raise FileNotFoundError(
-            f"Explicit edge embedding file not found:\n{embedding_file}"
-        )
+        raise FileNotFoundError(f"Explicit edge embedding file not found:\n{embedding_file}")
 
     emb = np.load(embedding_file)
-
     if emb.ndim != 2:
-        raise ValueError(
-            f"Embedding file must be 2D, got shape={emb.shape}"
-        )
+        raise ValueError(f"Embedding file must be 2D, got shape={emb.shape}")
 
     train_csv = project_dir / "train_edges.csv"
-
     if not train_csv.exists():
-        raise FileNotFoundError(
-            f"Missing train_edges.csv:\n{train_csv}"
-        )
+        raise FileNotFoundError(f"Missing train_edges.csv:\n{train_csv}")
 
     train_df = pd.read_csv(train_csv)
-
     if "row_index" not in train_df.columns:
-        raise ValueError(
-            f"{train_csv} must contain row_index."
-        )
+        raise ValueError(f"{train_csv} must contain row_index.")
 
     row_indices = train_df["row_index"].astype(int).to_numpy()
-
     if len(row_indices) == 0:
         raise ValueError("train_edges.csv contains no training edges.")
 
     max_row = int(row_indices.max())
-
     if emb.shape[0] <= max_row:
         raise ValueError(
             f"Embedding file has {emb.shape[0]} rows, "
@@ -151,10 +104,7 @@ def load_explicit_text_edge_features(project_dir: Path, embedding_file: Path):
     train_edge_attr = emb[row_indices].astype(np.float32, copy=False)
 
     if train_edge_attr.shape[0] != len(train_df):
-        raise RuntimeError(
-            "Number of selected edge features does not match "
-            "number of train edges."
-        )
+        raise RuntimeError("Number of selected edge features does not match number of train edges.")
 
     return train_edge_attr, emb
 
@@ -162,12 +112,12 @@ def load_explicit_text_edge_features(project_dir: Path, embedding_file: Path):
 def main():
     ap = argparse.ArgumentParser()
 
-    ap.add_argument("--project_dir", required=True,)
-    ap.add_argument("--checkpoint", required=True,)
-    ap.add_argument("--edge_attr_file", required=True, help="Explicit text-only review embedding file, e.g. review_embeddings_text_only.npy",)
-    ap.add_argument("--output", required=True,)
-    ap.add_argument("--embedding_dim", type=int, default=None, help="Optional. If omitted, inferred from checkpoint.",)
-    ap.add_argument("--layers", type=int, default=None, help="Optional. If omitted, inferred from checkpoint.",)
+    ap.add_argument("--project_dir", required=True)
+    ap.add_argument("--checkpoint", required=True)
+    ap.add_argument("--edge_attr_file", required=True, help="Explicit text-only review embedding file, e.g. review_embeddings_text_only.npy")
+    ap.add_argument("--output", required=True)
+    ap.add_argument("--embedding_dim", type=int, default=None, help="Optional. If omitted, inferred from checkpoint.")
+    ap.add_argument("--layers", type=int, default=None, help="Optional. If omitted, inferred from checkpoint.")
 
     args = ap.parse_args()
 
@@ -176,19 +126,13 @@ def main():
     output_path = Path(args.output)
 
     if not checkpoint_path.exists():
-        raise FileNotFoundError(
-            f"Checkpoint not found:\n{checkpoint_path}"
-        )
+        raise FileNotFoundError(f"Checkpoint not found:\n{checkpoint_path}")
 
     print("=" * 80)
     print("Base embedding extraction")
     print("=" * 80)
 
-    state_dict = torch.load(
-        checkpoint_path,
-        map_location="cpu",
-        weights_only=True,
-    )
+    state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
 
     checkpoint_edge_dim = infer_checkpoint_edge_dim(state_dict)
     checkpoint_embedding_dim = infer_checkpoint_embedding_dim(state_dict)
@@ -267,20 +211,12 @@ def main():
             f"graph={expected_train_edges}"
         )
 
-    data["user", "rates", "item"].edge_attr = torch.from_numpy(
-        train_edge_attr
-    )
-
-    data["item", "rated_by", "user"].edge_attr = torch.from_numpy(
-        train_edge_attr
-    )
-
+    data["user", "rates", "item"].edge_attr = torch.from_numpy(train_edge_attr)
+    data["item", "rated_by", "user"].edge_attr = torch.from_numpy(train_edge_attr)
     data_h = data.to_homogeneous()
 
     if not hasattr(data_h, "edge_attr") or data_h.edge_attr is None:
-        raise RuntimeError(
-            "edge_attr disappeared during to_homogeneous()."
-        )
+        raise RuntimeError("edge_attr disappeared during to_homogeneous().")
 
     actual_homogeneous_edge_dim = int(data_h.edge_attr.shape[1])
 
@@ -317,18 +253,12 @@ def main():
     model.eval()
 
     with torch.no_grad():
-        out = model.get_embedding(
-            data_h.edge_index,
-            edge_attr=data_h.edge_attr,
-        )
+        out = model.get_embedding(data_h.edge_index, edge_attr=data_h.edge_attr)
 
     user_emb = out[:num_users].cpu()
     item_emb = out[num_users:].cpu()
 
-    output_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     torch.save(
         {

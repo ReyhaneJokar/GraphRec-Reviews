@@ -109,7 +109,7 @@ def stable_unit_score(row_index: int, seed: int) -> float:
     sample, etc., for the same --sample_seed. This means labeling a larger
     fraction later never re-labels rows already paid for at a smaller
     fraction -- important since the whole point of this script is to keep LLM
-    calls to a minimum (idea.md's core cost argument).
+    calls to a minimum.
     """
     h = hashlib.sha256(f"{seed}:{row_index}".encode("utf-8")).hexdigest()
     return int(h[:16], 16) / float(1 << 64)
@@ -135,8 +135,11 @@ def load_existing_records(output_jsonl: Path) -> Tuple[List[Dict[str, Any]], set
             rec["row_index"] = row_index
             by_row_index[row_index] = rec
     ordered_records = [by_row_index[k] for k in sorted(by_row_index.keys())]
-    processed_row_ids = set(by_row_index.keys())
-    return ordered_records, processed_row_ids
+    succeeded_row_ids = {
+        r["row_index"] for r in ordered_records
+        if r.get("negative_confidence") is not None and r.get("error") is None
+    }
+    return ordered_records, succeeded_row_ids
 
 
 def call_llm_with_retry(
@@ -147,10 +150,14 @@ def call_llm_with_retry(
     temperature: float = 0.0,
     retries: int = 4,
     base_sleep: float = 1.5,
+    reasoning_effort: Optional[str] = None,
 ) -> Dict[str, Any]:
     last_error: Optional[Exception] = None
     for attempt in range(retries):
         try:
+            extra_kwargs = {}
+            if reasoning_effort:
+                extra_kwargs["reasoning_effort"] = reasoning_effort
             resp = client.chat.completions.create(
                 model=model_name,
                 messages=[
@@ -159,6 +166,7 @@ def call_llm_with_retry(
                 ],
                 temperature=temperature,
                 max_tokens=max_tokens,
+                **extra_kwargs,
             )
             content = resp.choices[0].message.content or ""
             data = parse_json_response(content)
@@ -195,20 +203,16 @@ def main():
     parser.add_argument("--input", required=True, help="negative_edges.csv from prepare_graph_inputs_rating_based.py")
     parser.add_argument("--output_jsonl", required=True)
     parser.add_argument("--output_csv", required=True)
-    parser.add_argument("--base_url", default="https://api.groq.com/openai/v1",
-                         help="Groq's OpenAI-compatible endpoint. Override if needed.")
+    parser.add_argument("--base_url", default="https://api.groq.com/openai/v1", help="Groq's OpenAI-compatible endpoint. Override if needed.")
     parser.add_argument("--api_key", required=True, help="Groq API key (GROQ_API_KEY)")
-    parser.add_argument("--model", default="llama-3.1-8b-instant")
-    parser.add_argument("--request_delay", type=float, default=0.5,
-                         help="Fixed sleep (seconds) after every call, on top of retry backoff, "
-                              "to stay under Groq's per-minute rate limit.")
-    parser.add_argument("--sample_frac", type=float, required=True,
-                         help="Fraction of negative_edges.csv to label, e.g. 0.10 for 10%%. "
-                              "Nested: 0.05 subset of 0.10 subset of 0.20, for the same --sample_seed.")
+    parser.add_argument("--model", default="openai/gpt-oss-20b")
+    parser.add_argument("--request_delay", type=float, default=0.5, help="Fixed sleep (seconds) after every call, on top of retry backoff, to stay under Groq's per-minute rate limit.")
+    parser.add_argument("--sample_frac", type=float, required=True, help="Fraction of negative_edges.csv to label, e.g. 0.10 for 10%%. Nested: 0.05 subset of 0.10 subset of 0.20, for the same --sample_seed.")
     parser.add_argument("--sample_seed", type=int, default=2024)
     parser.add_argument("--max_rows", type=int, default=-1, help="Limit rows for smoke test after sampling; -1 means all")
     parser.add_argument("--max_chars", type=int, default=1500)
-    parser.add_argument("--max_tokens", type=int, default=150)
+    parser.add_argument("--max_tokens", type=int, default=600, help="Reasoning models (e.g. openai/gpt-oss-20b) spend part of this budget on internal reasoning before the JSON answer; too low truncates the answer (empty or unterminated JSON).")
+    parser.add_argument("--reasoning_effort", default="low", choices=["none", "low", "medium", "high", "default"], help="Only applies to Groq reasoning models (openai/gpt-oss-20b/120b, qwen3). 'low' minimizes reasoning-token spend so more of --max_tokens is left for the actual JSON answer -- this task doesn't need deep reasoning.")
     parser.add_argument("--checkpoint_every", type=int, default=50)
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
@@ -240,16 +244,6 @@ def main():
         records, processed_row_ids = load_existing_records(output_jsonl)
         print(f"Resuming from {len(processed_row_ids)} already processed rows.")
 
-    success = 0
-    failures = 0
-    conf_values: List[float] = []
-    for rec in records:
-        if rec.get("negative_confidence") is not None:
-            success += 1
-            conf_values.append(rec["negative_confidence"])
-        elif rec.get("error") is not None:
-            failures += 1
-
     mode = "a" if args.resume and output_jsonl.exists() else "w"
     with output_jsonl.open(mode, encoding="utf-8") as f:
         for _, row in tqdm(df.iterrows(), total=len(df), desc="NegConfidence"):
@@ -277,12 +271,10 @@ def main():
                     review_text=review_text,
                     max_tokens=args.max_tokens,
                     temperature=0.0,
+                    reasoning_effort=(None if args.reasoning_effort == "default" else args.reasoning_effort),
                 )
                 record.update(result)
-                success += 1
-                conf_values.append(record["negative_confidence"])
             except Exception as e:
-                failures += 1
                 record["error"] = str(e)
                 print(f"\n[ERROR] row={row_index} user={record['user_id']} item={record['item_id']}")
                 print(repr(e))
@@ -300,6 +292,14 @@ def main():
     if not out_df.empty and "row_index" in out_df.columns:
         out_df = out_df.sort_values("row_index").drop_duplicates(subset=["row_index"], keep="last").reset_index(drop=True)
     out_df.to_csv(output_csv, index=False, encoding="utf-8-sig")
+
+    if "negative_confidence" in out_df.columns:
+        success = int(out_df["negative_confidence"].notna().sum())
+        conf_values = out_df["negative_confidence"].dropna().tolist()
+    else:
+        success = 0
+        conf_values = []
+    failures = int(out_df["error"].notna().sum()) if "error" in out_df.columns else 0
 
     summary = {
         "sample_frac": args.sample_frac,

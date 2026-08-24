@@ -164,10 +164,6 @@ class ReFINe_plus(torch.nn.Module):
         return out
 
     def content_parameters(self):
-        """Parameters belonging only to the review-content injection path
-        (edge_attr_proj + per-layer gate MLPs), regularized separately in
-        main.py's train() loop so tightening this doesn't disturb the
-        base embedding's own regularization."""
         params = []
         if self.edge_attr_proj is not None:
             params += list(self.edge_attr_proj.parameters())

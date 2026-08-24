@@ -44,13 +44,7 @@ def load_sentence_transformer_with_retry(model_name: str, local_model_dir, retri
             if attempt < retries:
                 print(f"Retrying in {wait}s ...")
                 time.sleep(wait)
-    raise RuntimeError(
-        f"Could not load '{source}' after {retries} attempts. If huggingface.co is "
-        f"unreachable/slow on your network: (1) pass --hf_endpoint to a mirror "
-        f"(e.g. https://hf-mirror.com), or (2) download the model once on a working "
-        f"connection/VPN and pass --local_model_dir pointing at that local folder "
-        f"(fully offline after that, no network calls at all)."
-    ) from last_err
+    raise RuntimeError(f"Could not load '{source}' after {retries} attempts.") from last_err
 
 
 def main():
@@ -59,7 +53,7 @@ def main():
     ap.add_argument("--model", default="all-MiniLM-L6-v2")
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--max_chars", type=int, default=1500)
-    ap.add_argument("--hf_endpoint", default=None, help="Override HF hub endpoint, e.g. https://hf-mirror.com")
+    ap.add_argument("--hf_endpoint", default=None, help="Override HF hub endpoint")
     ap.add_argument("--hf_timeout", type=float, default=60.0, help="Per-request timeout in seconds (default requests timeout is 10s).")
     ap.add_argument("--local_model_dir", default=None, help="Load the model from a local folder instead of the network.")
     ap.add_argument("--load_retries", type=int, default=5)

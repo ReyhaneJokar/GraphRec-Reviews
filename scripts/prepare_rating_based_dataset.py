@@ -3,8 +3,6 @@ Splits:
   rating >= positive_cutoff (4)          -> positive (train/val/test, leave-one/two-out per user)
   rating <= negative_cutoff (1)          -> negative (train only)
   negative_cutoff < rating < positive_cutoff (2,3) -> neutral (train only)
-
-No ABSA/sentiment LLM step required
 """
 import argparse
 from pathlib import Path

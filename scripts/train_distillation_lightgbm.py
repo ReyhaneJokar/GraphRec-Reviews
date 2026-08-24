@@ -43,8 +43,6 @@ def main():
     parser.add_argument("--sample_frac", type=float, required=True)
     parser.add_argument("--feature_set", choices=["simple", "full"], default="simple")
     parser.add_argument("--n_folds", type=int, default=5)
-    # Deliberately conservative defaults: ~340 train rows/fold, heavy
-    # regularization to avoid the same overfitting failure seen with the MLP.
     parser.add_argument("--n_estimators", type=int, default=300)
     parser.add_argument("--num_leaves", type=int, default=7)
     parser.add_argument("--max_depth", type=int, default=3)
@@ -55,12 +53,8 @@ def main():
     parser.add_argument("--subsample", type=float, default=0.8)
     parser.add_argument("--colsample_bytree", type=float, default=0.8)
     parser.add_argument("--early_stopping_rounds", type=int, default=30)
-    parser.add_argument("--weight_floor", type=float, default=1.0,
-                         help="Final weight when negative_confidence=0. Default 1.0 "
-                              "= no worse than a generic unknown item.")
-    parser.add_argument("--weight_ceiling", type=float, default=1.5,
-                         help="Final weight when negative_confidence=1. MUST match "
-                              "--real_neg_samp_prob of the main.py run this feeds into.")
+    parser.add_argument("--weight_floor", type=float, default=1.0, help="Final weight when negative_confidence=0. Default 1.0 = no worse than a generic unknown item.")
+    parser.add_argument("--weight_ceiling", type=float, default=1.5, help="Final weight when negative_confidence=1. MUST match --real_neg_samp_prob of the main.py run this feeds into.")
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--output_weights", required=True)
     parser.add_argument("--output_model", default=None)
@@ -152,12 +146,12 @@ def main():
     print(f"Improvement over mean baseline: {improvement:.2f}%")
     if improvement < 0:
         print("[WARN] Still worse than predicting the constant mean. This points "
-              "toward a genuine data-size bottleneck (421 labels) rather than a "
+              "toward a genuine data-size bottleneck rather than a "
               "model-class issue -- consider labeling a larger --sample_frac "
               "before trusting per-edge weights from either model.")
     else:
         print("[OK] Beats the constant-mean baseline -- LightGBM is picking up "
-              "real signal the MLP could not with the same 421 labels. The MLP's "
+              "real signal the MLP could not with the same number of labels. The MLP's "
               "failure was a model-class/optimization issue, not purely a data-"
               "size ceiling.")
     print(f"Fold MSE mean: {np.mean(fold_losses):.6f}")
