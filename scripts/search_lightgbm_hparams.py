@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """
 Small random hyperparameter search for the LightGBM negative-confidence
 distiller, selected ONLY by 5-fold OOF improvement over the constant-mean
@@ -8,13 +7,6 @@ once with the winning values, then run main.py once for the official
 seed-comparison. Never loop back and re-pick hyperparameters after seeing
 main.py's test metrics -- that turns this into test-set overfitting
 (the exact p-hacking risk flagged earlier for --weight_floor/--weight_ceiling).
-
-Same optimism-bias caveat as any non-nested small-data search: the OOF
-metric used here also implicitly guided the search, so the reported best
-OOF number is mildly optimistic vs a fully nested CV. With only 421 labels,
-true nested CV would shrink folds further and add its own variance -- this
-is a pragmatic tradeoff, worth stating explicitly in the paper's methodology
-section if this path is used.
 """
 import argparse
 import random
