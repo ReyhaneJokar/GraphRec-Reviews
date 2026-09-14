@@ -408,6 +408,17 @@ if best_ckpt_path.exists():
 else:
     torch.save(model.state_dict(), best_ckpt_path)
 
+
+val_metrics_dict = {}
+for k, (precision, recall, ndcg) in zip(topks, early_stopping.best_metrics):
+    val_metrics_dict[f"Precision@{k}"] = float(precision)
+    val_metrics_dict[f"Recall@{k}"] = float(recall)
+    val_metrics_dict[f"NDCG@{k}"] = float(ndcg)
+with open(val_metrics_path, "w", encoding="utf-8") as f:
+    json.dump(val_metrics_dict, f, ensure_ascii=False, indent=2)
+print(f"Saved best validation metrics: {val_metrics_path}")
+
+
 data, _, _ = data_loader.data_loading(project_dir=args.project_dir, load_val_or_test='test')
 num_users, num_items = data['user'].num_nodes, data['item'].num_nodes
 data = data.to_homogeneous().to(device)
@@ -433,6 +444,12 @@ for k, (precision, recall, ndcg) in zip(topks, results):
               f'NDCG@{k}: {ndcg:.4f}')
 
 print('#############################################################################')
+
+val_metrics_dict = {}
+for k, (precision, recall, ndcg) in zip(topks, early_stopping.best_metrics):
+    val_metrics_dict[f"Precision@{k}"] = float(precision)
+    val_metrics_dict[f"Recall@{k}"] = float(recall)
+    val_metrics_dict[f"NDCG@{k}"] = float(ndcg)
 
 with open(test_metrics_path, "w", encoding="utf-8") as f:
     json.dump(metrics_dict, f, ensure_ascii=False, indent=2)
