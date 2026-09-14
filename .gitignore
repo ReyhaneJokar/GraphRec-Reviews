@@ -32,6 +32,9 @@ cache/
 # Logs
 results4comparison/
 result/
+result_server/
+logs/
+logs_server/
 *.log
 
 # OS
