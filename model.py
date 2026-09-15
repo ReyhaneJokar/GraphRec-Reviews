@@ -48,7 +48,7 @@ class EdgeAwareLGConv(MessagePassing):
         return msg
 
 class ReFINe_plus(torch.nn.Module):
-    def __init__(self, num_nodes: int, embedding_dim: int, num_layers: int, num_users: int, num_items: int, edge_attr_dim: int = 0, alpha: Optional[Union[float, Tensor]] = None, learnable_alpha: bool = True, **kwargs):
+    def __init__(self, num_nodes: int, embedding_dim: int, num_layers: int, num_users: int, num_items: int, edge_attr_dim: int = 0, alpha: Optional[Union[float, Tensor]] = None, learnable_alpha: bool = True, disable_gate: bool = False, **kwargs):
         super().__init__()
 
         self.num_nodes = num_nodes
@@ -79,7 +79,7 @@ class ReFINe_plus(torch.nn.Module):
      
         self.embedding = Embedding(num_nodes, embedding_dim)
         self.convs = ModuleList([
-            EdgeAwareLGConv(embedding_dim=embedding_dim, use_gate=(edge_attr_dim > 0))
+            EdgeAwareLGConv(embedding_dim=embedding_dim, use_gate=(edge_attr_dim > 0 and not disable_gate))
             for _ in range(num_layers)
         ])
 

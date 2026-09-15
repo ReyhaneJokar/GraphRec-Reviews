@@ -39,9 +39,10 @@ parser.add_argument('--content_reg_weight', type=float, default=0.0005, help='L2
 parser.add_argument('--early_stop_metric', type=str, default='combined', choices=['recall', 'ndcg', 'combined'], help='Metric used for best-checkpoint selection / early stopping (at the largest top_k). Default matches all prior experiments in this project (recall@max_k).')
 parser.add_argument('--fixed_alpha', action='store_true', help='Freeze layer-combination weights at 1/(L+1) (non-trainable), matching the original base ReFINe_plus model.py, instead of the learnable softmax-normalized alpha.')
 parser.add_argument('--neg_confidence_weights_path', type=str, default=None, help='Path to per-negative confidence weights (.npy), aligned with negative_edges.csv.')
-parser.add_argument('--eval_protocol', type=str, default='full', choices=['full', 'sampled99'], help='full = rank against the entire item catalog (default; used for all prior Musical Instruments/Digital Music results). sampled99 = 1 positive + N sampled negatives per test user (DualGCN/NCF-style leave-one-out, needed to compare against DualGCN Table 5).')
+parser.add_argument('--eval_protocol', type=str, default='full', choices=['full', 'sampled99'], help='full = rank against the entire item catalog. sampled99 = 1 positive + N sampled negatives per test user.')
 parser.add_argument('--eval_neg_samples', type=int, default=99, help='Number of sampled negatives per test user under --eval_protocol sampled99.')
 parser.add_argument('--eval_sample_seed', type=int, default=42, help='Seed for the sampled negative candidate pool. Keep this FIXED and identical across every method/seed you compare on the same dataset -- otherwise each run ranks against a different random 100-item pool and differences stop being attributable to the model.')
+parser.add_argument('--disable_gate', action='store_true', help='Ablation: inject edge content unconditionally (no learned gate), to isolate the gate\'s own contribution from the effect of having edge content at all.')
 args = parser.parse_args()
 #############################################################################
 
@@ -53,7 +54,6 @@ torch.cuda.manual_seed(seed)
 torch.cuda.manual_seed_all(seed)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
-# torch.use_deterministic_algorithms(True)
 os.environ['PYTHONHASHSEED'] = str(seed)
 
 gpu = 'cuda:'+str(args.gpu_id)
@@ -130,6 +130,7 @@ model = ReFINe_plus(
     num_items=num_items,
     edge_attr_dim=edge_attr_dim,
     learnable_alpha=not args.fixed_alpha,
+    disable_gate=args.disable_gate,
 ).to(device)
 
 if edge_attr_dim > 0:
@@ -374,15 +375,15 @@ for epoch in range(1, args.epochs + 1):
                 mean_dir = mean_dir / mean_dir.norm(dim=-1, keepdim=True).clamp_min(1e-8)
                 cos_sim = (directions * mean_dir).sum(dim=-1)
                 
-            with torch.no_grad():
-                sample_attr = data.edge_attr[:2000]
-                sample_dst = data.edge_index[1, :2000]
-                x_sample = model.embedding.weight[sample_dst]
-                edge_feat_sample = model.compute_edge_feat_direction(sample_attr)
-                gate0 = torch.sigmoid(model.convs[0].gate_mlp(torch.cat([x_sample, edge_feat_sample], dim=-1)))
-                gate_last = torch.sigmoid(model.convs[-1].gate_mlp(torch.cat([x_sample, edge_feat_sample], dim=-1)))
-            print(f"  gate layer0: mean={gate0.mean().item():.4f}, std={gate0.std().item():.4f}")
-            print(f"  gate layerN: mean={gate_last.mean().item():.4f}, std={gate_last.std().item():.4f}")
+            # with torch.no_grad():
+            #     sample_attr = data.edge_attr[:2000]
+            #     sample_dst = data.edge_index[1, :2000]
+            #     x_sample = model.embedding.weight[sample_dst]
+            #     edge_feat_sample = model.compute_edge_feat_direction(sample_attr)
+            #     gate0 = torch.sigmoid(model.convs[0].gate_mlp(torch.cat([x_sample, edge_feat_sample], dim=-1)))
+            #     gate_last = torch.sigmoid(model.convs[-1].gate_mlp(torch.cat([x_sample, edge_feat_sample], dim=-1)))
+            # print(f"  gate layer0: mean={gate0.mean().item():.4f}, std={gate0.std().item():.4f}")
+            # print(f"  gate layerN: mean={gate_last.mean().item():.4f}, std={gate_last.std().item():.4f}")
             print(f"  direction cos-sim to mean: mean={cos_sim.mean().item():.4f}, std={cos_sim.std().item():.4f}")
 
 
