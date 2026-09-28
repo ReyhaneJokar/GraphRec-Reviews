@@ -48,7 +48,7 @@ The two mechanisms are architecturally independent — the first changes how mes
 ## Architecture
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="Overall architecture of the proposed system" width="900"/>
+  <img src="docs/architecture.png" alt="Overall architecture of the proposed system" width="900"/>
 </p>
 
 *Figure 1. Overall architecture. A user-item interaction graph is partitioned into positive, negative, and neutral edges by rating. **Innovation 1** (left) injects review embeddings as edge features during graph propagation. **Innovation 2** (right) distills LLM-derived confidence over negative feedback onto a lightweight student model whose calibrated output reweights the ranking loss.*
