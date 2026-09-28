@@ -18,7 +18,7 @@ import data_loader, utils
 parser = argparse.ArgumentParser()
 parser.add_argument('--random_seed', type=int, default=7)
 parser.add_argument('--gpu_id', type=int, default=0)
-parser.add_argument('--dataset', type=str, default='ML-100K')
+parser.add_argument('--dataset', type=str, default='Toys_2014')
 parser.add_argument('--dataset_augment', type=str, default='original')
 parser.add_argument('--batch_size', type=int, default=512)
 parser.add_argument('--test_batch_size', type=int, default=4096)
